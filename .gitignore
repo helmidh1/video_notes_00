@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# WXT build outputs
+.output/
+.wxt/
+
+# Environment and sensitive keys
+.env
+.env.local
+*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary & scrap files
+scrap.txt
+*.tmp

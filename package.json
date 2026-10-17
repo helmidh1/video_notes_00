@@ -1,0 +1,30 @@
+{
+  "name": "video-notes",
+  "description": "Capture video frames, interactive timestamps, transcripts, and Markdown notes directly into an Obsidian vault.",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "test": "vitest run",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "@google/genai": "^0.2.0",
+    "idb-keyval": "^6.3.0",
+    "lucide-react": "^0.460.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.270",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@wxt-dev/module-react": "^1.2.2",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5",
+    "wxt": "^0.19.29"
+  }
+}
