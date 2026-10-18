@@ -47,7 +47,9 @@ To achieve the best possible developer and user experience, the following free t
 | **Puppeteer / Browser Automation MCP** | Automates end-to-end testing of extension injection, video seek synchronization, and canvas capture across YouTube and web video players. | Headless Chrome |
 | **StitchMCP** *(Configured)* | Generates UI design systems and aesthetic component variants for high-contrast dark mode interfaces. | Google Stitch MCP |
 
-### 2. Recommended Agent Skills (`.agents/skills/`)
+### 2. Active Workspace Skills (`.agents/skills/`)
+- `update-docs` / `docs`: Automated audit and synchronization workflow for `GEMINI.md`, `README.md`, `package.json`, and project docs.
+- `git-commit-push` / `commit`: Safe pre-commit audit, typecheck/test validation gates, Conventional Commits formatting, staging, and remote push.
 - `wxt-extension-dev`: Architectural cheatsheet and rules for WXT, Chromium Manifest V3, Side Panel API, Content Script lifecycle, and isolated world execution.
 - `obsidian-markdown-spec`: Reference specifications for Obsidian Markdown (Wikilinks `![[attachment.png]]`, callout formats `> [!tip]`, frontmatter schemas, Dataview tags, and timestamp deep links).
 - `gemini-multimodal-assistant`: Multimodal prompt engineering guides for Gemini 2.0 / 2.5 Flash (OCR, architecture diagram interpretation, code transcription, and structured study notes).
@@ -103,7 +105,8 @@ video_notes_00/
 │   └── vaultStorage.ts             # Obsidian vault writer, Wikilink generator, image saver
 ├── tests/
 │   ├── noteMerge.test.ts           # Non-destructive merge, frontmatter isolation & timestamp tests
-│   └── utils.test.ts               # Timestamp formatting, seek parsing & caption deduplication tests
+│   ├── utils.test.ts               # Timestamp formatting, seek parsing & caption deduplication tests
+│   └── vaultStorage.test.ts        # Obsidian vault writer, Wikilink & attachment tests
 ├── package.json                    # Project dependencies and build scripts
 ├── tsconfig.json                   # Strict TypeScript configuration
 ├── wxt.config.ts                   # WXT Manifest V3 extension configuration
