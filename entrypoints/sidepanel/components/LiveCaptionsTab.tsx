@@ -22,6 +22,10 @@ interface LiveCaptionsTabProps {
   onInsertIntoNotes: (text: string) => void;
   onSeek: (timestamp: number) => void;
   pageUrl: string;
+  linkedTabId?: number;
+  linkedUrl?: string;
+  captionItems?: LiveCaptionItem[];
+  onUpdateCaptionItems?: (items: LiveCaptionItem[]) => void;
   onSummarizeWithAI: (transcript: string) => void;
   onOpenSettings: () => void;
 }
@@ -30,6 +34,10 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
   onInsertIntoNotes,
   onSeek,
   pageUrl,
+  linkedTabId,
+  linkedUrl,
+  captionItems: externalCaptionItems,
+  onUpdateCaptionItems,
   onSummarizeWithAI,
   onOpenSettings,
 }) => {
@@ -40,7 +48,20 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
   const [isRecording, setIsRecording] = useState(true);
   const [autoAppend, setAutoAppend] = useState(false);
   const [activeLiveText, setActiveLiveText] = useState('');
-  const [captionItems, setCaptionItems] = useState<LiveCaptionItem[]>([]);
+  const [internalCaptionItems, setInternalCaptionItems] = useState<LiveCaptionItem[]>([]);
+  const captionItems = externalCaptionItems !== undefined ? externalCaptionItems : internalCaptionItems;
+
+  const setCaptionItems = (updater: LiveCaptionItem[] | ((prev: LiveCaptionItem[]) => LiveCaptionItem[])) => {
+    if (typeof updater === 'function') {
+      const next = updater(captionItems);
+      if (onUpdateCaptionItems) onUpdateCaptionItems(next);
+      setInternalCaptionItems(next);
+    } else {
+      if (onUpdateCaptionItems) onUpdateCaptionItems(updater);
+      setInternalCaptionItems(updater);
+    }
+  };
+
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedSuccess, setCopiedSuccess] = useState(false);
   const [showSetupModal, setShowSetupModal] = useState(false);
@@ -50,6 +71,25 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const lastCommittedTextRef = useRef<string>('');
   const accumulatedTextRef = useRef<string>('');
+
+  const isRecordingRef = useRef(isRecording);
+  isRecordingRef.current = isRecording;
+  const autoAppendRef = useRef(autoAppend);
+  autoAppendRef.current = autoAppend;
+  const pageUrlRef = useRef(pageUrl);
+  pageUrlRef.current = pageUrl;
+  const linkedTabIdRef = useRef(linkedTabId);
+  linkedTabIdRef.current = linkedTabId;
+  const linkedUrlRef = useRef(linkedUrl);
+  linkedUrlRef.current = linkedUrl;
+
+  // Reset rolling text buffer when session tab link changes
+  useEffect(() => {
+    setActiveLiveText('');
+    lastCommittedTextRef.current = '';
+    accumulatedTextRef.current = captionItems.map((c) => c.text).join(' ');
+  }, [linkedTabId, linkedUrl]);
+
   const lastKnownVideoTimeRef = useRef<{ timestamp: number; formattedTime: string }>({
     timestamp: 0,
     formattedTime: '00:00',
@@ -83,7 +123,7 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [captionItems, activeLiveText]);
 
-  // Connect to Chrome Live Caption Bridge (ws://127.0.0.1:8765)
+  // Connect to Chrome Live Caption Bridge (ws://127.0.0.1:8765) once on mount
   useEffect(() => {
     let isMounted = true;
 
@@ -101,7 +141,7 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
         };
 
         ws.onmessage = async (evt) => {
-          if (!isMounted || !isRecording) return;
+          if (!isMounted || !isRecordingRef.current) return;
           try {
             const data = JSON.parse(evt.data);
 
@@ -138,8 +178,8 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
                 setCaptionItems((prev) => [...prev, newItem]);
                 setActiveLiveText('');
 
-                if (autoAppend) {
-                  const line = `\n- [${formattedTime}](${pageUrl}#t=${Math.floor(timestamp)}s) ${delta}`;
+                if (autoAppendRef.current) {
+                  const line = `\n- [${formattedTime}](${pageUrlRef.current}#t=${Math.floor(timestamp)}s) ${delta}`;
                   onInsertIntoNotes(line);
                 }
               }
@@ -179,7 +219,7 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
         socketRef.current = null;
       }
     };
-  }, [isRecording, autoAppend, pageUrl]);
+  }, []);
 
   // Start in-browser closed caption fallback observer
   useEffect(() => {
@@ -201,9 +241,25 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
     initWebCaptionObserver();
 
     // Listen for captions emitted by content script
-    const webCaptionListener = (msg: ExtensionMessage) => {
-      if (!isMounted || !isRecording) return;
+    const webCaptionListener = (msg: ExtensionMessage, sender?: chrome.runtime.MessageSender) => {
+      if (!isMounted || !isRecordingRef.current) return;
       if (msg.type === 'LIVE_WEB_CAPTION' && msg.text) {
+        // Tab-specific isolation: ignore captions from other tabs
+        const senderTabId = sender?.tab?.id ?? msg.tabId;
+        const senderUrl = sender?.tab?.url ?? msg.pageUrl;
+
+        if (linkedTabIdRef.current && senderTabId && senderTabId !== linkedTabIdRef.current) {
+          return;
+        }
+
+        if (linkedUrlRef.current && senderUrl) {
+          const cleanLinked = linkedUrlRef.current.split('#')[0].replace(/[?&]t=\d+s?/, '');
+          const cleanSender = senderUrl.split('#')[0].replace(/[?&]t=\d+s?/, '');
+          if (cleanLinked && cleanSender && cleanLinked !== cleanSender) {
+            return;
+          }
+        }
+
         // If bridge is not connected, set status to web-only
         if (connectionStatus === 'disconnected' || connectionStatus === 'connecting') {
           setConnectionStatus('web-only');
@@ -225,12 +281,13 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
             formattedTime: msg.formattedTime,
             isFinal: true,
             source: 'web-caption',
+            tabId: senderTabId,
           };
 
           setCaptionItems((prev) => [...prev, newItem]);
 
-          if (autoAppend) {
-            const line = `\n- [${msg.formattedTime}](${pageUrl}#t=${Math.floor(msg.timestamp)}s) ${delta}`;
+          if (autoAppendRef.current) {
+            const line = `\n- [${msg.formattedTime}](${pageUrlRef.current}#t=${Math.floor(msg.timestamp)}s) ${delta}`;
             onInsertIntoNotes(line);
           }
         }

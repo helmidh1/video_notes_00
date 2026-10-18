@@ -363,6 +363,7 @@ function startLiveCaptionObserver() {
           text: fullText,
           timestamp: time,
           formattedTime: formatSeconds(time),
+          pageUrl: window.location.href,
         }).catch(() => {});
       }
     }
@@ -387,6 +388,7 @@ function startLiveCaptionObserver() {
             text,
             timestamp: time,
             formattedTime: formatSeconds(time),
+            pageUrl: window.location.href,
           }).catch(() => {});
         }
       }

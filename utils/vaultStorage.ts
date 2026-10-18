@@ -137,18 +137,58 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs = 7000, errorMsg = 'File 
   });
 }
 
+export async function resolveDirectoryHandle(
+  rootHandle: FileSystemDirectoryHandle,
+  folderPath?: string,
+  create = true
+): Promise<FileSystemDirectoryHandle> {
+  if (!folderPath || !folderPath.trim() || folderPath.trim() === '/' || folderPath.trim() === '.') {
+    return rootHandle;
+  }
+  const segments = folderPath.replace(/\\/g, '/').split('/').map((s) => s.trim()).filter(Boolean);
+  let current = rootHandle;
+  for (const segment of segments) {
+    current = await current.getDirectoryHandle(segment, { create });
+  }
+  return current;
+}
+
+export async function getDirectoryHandleIfExists(
+  rootHandle: FileSystemDirectoryHandle,
+  folderPath?: string
+): Promise<FileSystemDirectoryHandle | null> {
+  if (!folderPath || !folderPath.trim() || folderPath.trim() === '/' || folderPath.trim() === '.') {
+    return rootHandle;
+  }
+  const segments = folderPath.replace(/\\/g, '/').split('/').map((s) => s.trim()).filter(Boolean);
+  let current = rootHandle;
+  for (const segment of segments) {
+    try {
+      current = await current.getDirectoryHandle(segment, { create: false });
+    } catch {
+      return null;
+    }
+  }
+  return current;
+}
+
 export async function saveBinaryAttachment(
   dirHandle: FileSystemDirectoryHandle,
   fileName: string,
   dataUrl: string,
   subfolder: string = 'attachments',
-  retries = 3
+  retries = 3,
+  folderPath?: string
 ): Promise<void> {
   let lastError: unknown;
+  const targetAttachmentPath = folderPath && folderPath.trim()
+    ? `${folderPath.trim()}/${subfolder}`
+    : subfolder;
+
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       await withTimeout((async () => {
-        const assetsDir = await dirHandle.getDirectoryHandle(subfolder, { create: true });
+        const assetsDir = await resolveDirectoryHandle(dirHandle, targetAttachmentPath, true);
         const fileHandle = await assetsDir.getFileHandle(fileName, { create: true });
         const writable = await fileHandle.createWritable();
         await writable.write(dataUrlToUint8Array(dataUrl) as unknown as BufferSource);
@@ -174,11 +214,14 @@ export interface ReadFileResult {
 
 export async function readMarkdownFileWithMeta(
   dirHandle: FileSystemDirectoryHandle,
-  fileName: string
+  fileName: string,
+  folderPath?: string
 ): Promise<ReadFileResult | null> {
   const safeName = fileName.replace(/[\r\n\t]/g, ' ').replace(/[<>:"/\\|?*]+/g, '-').replace(/\.md$/, '').trim() || 'Video-Note';
   try {
-    const fileHandle = await dirHandle.getFileHandle(`${safeName}.md`);
+    const targetDir = await getDirectoryHandleIfExists(dirHandle, folderPath);
+    if (!targetDir) return null;
+    const fileHandle = await targetDir.getFileHandle(`${safeName}.md`);
     const file = await fileHandle.getFile();
     const content = await file.text();
     return { content, lastModified: file.lastModified };
@@ -189,19 +232,31 @@ export async function readMarkdownFileWithMeta(
 
 export async function readMarkdownFile(
   dirHandle: FileSystemDirectoryHandle,
-  fileName: string
+  fileName: string,
+  folderPath?: string
 ): Promise<string | null> {
-  const res = await readMarkdownFileWithMeta(dirHandle, fileName);
+  const res = await readMarkdownFileWithMeta(dirHandle, fileName, folderPath);
   return res ? res.content : null;
 }
 
 export async function readBinaryAttachment(
   dirHandle: FileSystemDirectoryHandle,
   fileName: string,
-  subfolder: string = 'attachments'
+  subfolder: string = 'attachments',
+  folderPath?: string
 ): Promise<string | null> {
   try {
-    const assetsDir = await dirHandle.getDirectoryHandle(subfolder);
+    // 1. Try session-specific subfolder first if specified
+    let assetsDir: FileSystemDirectoryHandle | null = null;
+    if (folderPath && folderPath.trim()) {
+      assetsDir = await getDirectoryHandleIfExists(dirHandle, `${folderPath.trim()}/${subfolder}`);
+    }
+    // 2. Fall back to root attachments directory
+    if (!assetsDir) {
+      assetsDir = await getDirectoryHandleIfExists(dirHandle, subfolder);
+    }
+    if (!assetsDir) return null;
+
     const fileHandle = await assetsDir.getFileHandle(fileName);
     const file = await fileHandle.getFile();
     return new Promise<string>((resolve) => {
@@ -230,34 +285,34 @@ export interface ExistingNoteResult {
 export async function findExistingNote(
   dirHandle: FileSystemDirectoryHandle,
   title: string,
-  pageUrl?: string
+  pageUrl?: string,
+  folderPath?: string
 ): Promise<ExistingNoteResult | null> {
   const safeName = title.replace(/[\r\n\t]/g, ' ').replace(/[<>:"/\\|?*]+/g, '-').trim();
 
-  // 1. Direct match by safe filename
+  // 1. Direct match by safe filename in target folder
   if (safeName) {
-    const directResult = await readMarkdownFileWithMeta(dirHandle, safeName);
+    const directResult = await readMarkdownFileWithMeta(dirHandle, safeName, folderPath);
     if (directResult) {
       return { fileName: `${safeName}.md`, content: directResult.content, lastModified: directResult.lastModified };
     }
   }
 
-  // 2. Search files in vault root for matching source URL or video ID
+  // 2. Search target folder or vault root for matching source URL or video ID
   if (pageUrl) {
     try {
+      const targetDir = (await getDirectoryHandleIfExists(dirHandle, folderPath)) || dirHandle;
       const cleanUrl = pageUrl.split('#')[0].replace(/[?&]t=\d+s?/, '');
-      // Extract video ID for YouTube or similar players
       const ytMatch = pageUrl.match(/(?:v=|\/embed\/|\/watch\?v=|youtu\.be\/|\/v\/)([a-zA-Z0-9_-]{11})/);
       const videoId = ytMatch ? ytMatch[1] : null;
 
-      const dirWithEntries = dirHandle as unknown as {
+      const dirWithEntries = targetDir as unknown as {
         values: () => AsyncIterable<FileSystemFileHandle | FileSystemDirectoryHandle>;
       };
       if (typeof dirWithEntries.values === 'function') {
         for await (const entry of dirWithEntries.values()) {
           if (entry.kind === 'file' && entry.name.endsWith('.md')) {
             const file = await (entry as FileSystemFileHandle).getFile();
-            // Read first 2KB for frontmatter speed
             const slice = file.slice(0, 2048);
             const text = await slice.text();
             if (text.includes(cleanUrl) || (videoId && text.includes(videoId))) {
@@ -285,7 +340,8 @@ export async function saveMarkdownFileNonDestructive(
   fileName: string,
   markdownContent: string,
   options: SaveMarkdownOptions = {},
-  retries = 3
+  retries = 3,
+  folderPath?: string
 ): Promise<{ finalContent: string; wasMerged: boolean; lastModified: number }> {
   const safeName = fileName.replace(/[\r\n\t]/g, ' ').replace(/[<>:"/\\|?*]+/g, '-').replace(/\.md$/, '').trim() || 'Video-Note';
   let lastError: unknown;
@@ -296,7 +352,8 @@ export async function saveMarkdownFileNonDestructive(
         let finalContent = markdownContent;
         let wasMerged = false;
 
-        const existingRes = await readMarkdownFileWithMeta(dirHandle, safeName);
+        const targetDir = await resolveDirectoryHandle(dirHandle, folderPath, true);
+        const existingRes = await readMarkdownFileWithMeta(dirHandle, safeName, folderPath);
 
         if (existingRes && existingRes.content.trim()) {
           const existingContent = existingRes.content;
@@ -305,29 +362,22 @@ export async function saveMarkdownFileNonDestructive(
             finalContent = markdownContent;
             wasMerged = false;
           } else if (options.baseContent !== undefined) {
-            // Optimistic concurrency control:
-            // If the content on disk matches what we loaded initially (baseContent),
-            // no external modifications occurred in Obsidian. We write user edits directly!
             if (existingContent.trim() === options.baseContent.trim()) {
               finalContent = markdownContent;
               wasMerged = false;
             } else if (existingContent.trim() === markdownContent.trim()) {
-              // Disk content already matches what we want to save
               return { finalContent: existingContent, wasMerged: false, lastModified: existingRes.lastModified };
             } else {
-              // Disk was modified externally in Obsidian while user was editing in extension!
-              // Perform intelligent non-destructive merge so Obsidian edits are never lost
               finalContent = mergeMarkdownNotes(existingContent, markdownContent);
               wasMerged = finalContent.trim() !== markdownContent.trim();
             }
           } else {
-            // Fallback when baseContent wasn't provided
             finalContent = mergeMarkdownNotes(existingContent, markdownContent);
             wasMerged = finalContent.trim() !== markdownContent.trim();
           }
         }
 
-        const fileHandle = await dirHandle.getFileHandle(`${safeName}.md`, { create: true });
+        const fileHandle = await targetDir.getFileHandle(`${safeName}.md`, { create: true });
         const writable = await fileHandle.createWritable({ keepExistingData: false });
         await writable.write(finalContent);
         await writable.close();
@@ -350,9 +400,10 @@ export async function saveMarkdownFile(
   dirHandle: FileSystemDirectoryHandle,
   fileName: string,
   markdownContent: string,
-  retries = 3
+  retries = 3,
+  folderPath?: string
 ): Promise<void> {
-  await saveMarkdownFileNonDestructive(dirHandle, fileName, markdownContent, { allowOverwrite: false }, retries);
+  await saveMarkdownFileNonDestructive(dirHandle, fileName, markdownContent, { allowOverwrite: false }, retries, folderPath);
 }
 
 export function generateObsidianFrontmatter(options: {

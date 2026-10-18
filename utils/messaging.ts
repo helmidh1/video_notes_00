@@ -7,7 +7,7 @@ export type ExtensionMessage =
   | { type: 'EXTRACT_TRANSCRIPT' }
   | { type: 'START_LIVE_CAPTIONS' }
   | { type: 'STOP_LIVE_CAPTIONS' }
-  | { type: 'LIVE_WEB_CAPTION'; text: string; timestamp: number; formattedTime: string }
+  | { type: 'LIVE_WEB_CAPTION'; text: string; timestamp: number; formattedTime: string; tabId?: number; pageUrl?: string }
   | {
       type: 'VIDEO_TIME_UPDATE';
       currentTime: number;
@@ -15,6 +15,7 @@ export type ExtensionMessage =
       duration: number;
       paused?: boolean;
       pageUrl?: string;
+      tabId?: number;
     }
   | { type: 'HOTKEY_COMMAND'; command: string };
 
@@ -25,6 +26,7 @@ export interface LiveCaptionItem {
   formattedTime: string;
   isFinal: boolean;
   source: 'chrome-live-caption' | 'windows-live-caption' | 'web-caption';
+  tabId?: number;
 }
 
 export interface VideoStateResponse {

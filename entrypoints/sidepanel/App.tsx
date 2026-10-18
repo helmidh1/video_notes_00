@@ -43,6 +43,21 @@ import { AIAssistant } from './components/AIAssistant';
 import { SettingsModal } from './components/SettingsModal';
 import { LiveCaptionsTab } from './components/LiveCaptionsTab';
 import { ReviewNoteModal } from './components/ReviewNoteModal';
+import { SessionManagerModal } from './components/SessionManagerModal';
+import {
+  type ManualSession,
+  getAllManualSessions,
+  getActiveManualSessionId,
+  setActiveManualSessionId,
+  saveManualSession,
+  createManualSession,
+  deleteManualSession,
+  getOrCreateCurrentManualSession,
+  sanitizeFileName,
+  sanitizeFolderPath,
+} from '../../utils/sessionManager';
+import { enqueueVaultOperation } from '../../utils/vaultQueue';
+import type { LiveCaptionItem } from '../../utils/messaging';
 import {
   FileText,
   Image,
@@ -56,6 +71,7 @@ import {
   Clock,
   BookOpen,
   Play,
+  Layers,
 } from 'lucide-react';
 import './styles/theme.css';
 
@@ -84,6 +100,13 @@ export default function App() {
   const [existingVaultMarkdown, setExistingVaultMarkdown] = useState('');
   const [existingVaultFileName, setExistingVaultFileName] = useState<string | null>(null);
 
+  // Manual session management state
+  const [sessions, setSessions] = useState<ManualSession[]>([]);
+  const [activeSession, setActiveSession] = useState<ManualSession | null>(null);
+  const [isSessionModalOpen, setIsSessionModalOpen] = useState(false);
+  const [currentTabInfo, setCurrentTabInfo] = useState<{ id?: number; url?: string; title?: string } | undefined>();
+  const [captionItems, setCaptionItems] = useState<LiveCaptionItem[]>([]);
+
   // Live video state and persisted playback progress
   const [liveVideoTime, setLiveVideoTime] = useState<{
     currentTime: number;
@@ -100,6 +123,10 @@ export default function App() {
   } | null>(null);
 
   // Synchronized refs to avoid stale closures in debounced/interval timers
+  const activeSessionRef = useRef<ManualSession | null>(null);
+  activeSessionRef.current = activeSession;
+  const captionItemsRef = useRef<LiveCaptionItem[]>([]);
+  captionItemsRef.current = captionItems;
   const markdownRef = useRef(markdown);
   markdownRef.current = markdown;
   const noteTitleRef = useRef(noteTitle);
@@ -170,15 +197,33 @@ export default function App() {
     return map;
   }, [frames]);
 
+  // Determine if active manual session matches the currently viewed browser tab
+  const isLinkedToActiveTab = useMemo(() => {
+    if (!activeSession) return false;
+    if (activeSession.linkedTabId && currentTabInfo?.id) {
+      return activeSession.linkedTabId === currentTabInfo.id;
+    }
+    if (activeSession.linkedUrl && currentTabInfo?.url) {
+      const cleanLinked = activeSession.linkedUrl.split('#')[0].replace(/[?&]t=\d+s?/, '');
+      const cleanTab = currentTabInfo.url.split('#')[0].replace(/[?&]t=\d+s?/, '');
+      return cleanLinked === cleanTab;
+    }
+    return false;
+  }, [activeSession, currentTabInfo]);
+
   // Check and load existing note from Obsidian vault (primary) or local storage cache (fallback)
   async function checkAndLoadExistingNote(
     titleToUse?: string,
     urlToUse?: string,
-    forceReload = false
+    forceReload = false,
+    folderPathToUse?: string
   ) {
     if (isCheckingVaultRef.current) return;
     const targetTitle = titleToUse || noteTitleRef.current;
     const targetUrl = urlToUse || pageUrlRef.current;
+    const targetFolder = folderPathToUse !== undefined
+      ? folderPathToUse
+      : (activeSessionRef.current?.obsidianFolderPath || '');
 
     // Load persisted video playback position from chrome.storage.local
     if (typeof chrome !== 'undefined' && chrome.storage?.local) {
@@ -202,7 +247,7 @@ export default function App() {
     if (dirHandle) {
       isCheckingVaultRef.current = true;
       try {
-        const match = await findExistingNote(dirHandle, targetTitle, targetUrl);
+        const match = await findExistingNote(dirHandle, targetTitle, targetUrl, targetFolder);
         if (match && match.content) {
           setExistingVaultMarkdown(match.content);
           setExistingVaultFileName(match.fileName);
@@ -236,7 +281,7 @@ export default function App() {
                 restoredFrames.push(existingFrame);
                 savedFrameIdsRef.current.add(existingFrame.id);
               } else {
-                const dataUrl = await readBinaryAttachment(dirHandle, fn);
+                const dataUrl = await readBinaryAttachment(dirHandle, fn, 'attachments', targetFolder);
                 if (dataUrl) {
                   const ts = foundTimestamps.find((t) => t.imageFileName === fn);
                   const newF: CapturedFrame = {
@@ -384,23 +429,51 @@ export default function App() {
       });
     }
 
-    // Check active tab info if in extension environment
+    // Check active tab info and initialize manual session
+    let tabActivatedListener: ((activeInfo: chrome.tabs.TabActiveInfo) => void) | null = null;
+    let tabUpdatedListener: ((tabId: number, changeInfo: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => void) | null = null;
+
     if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
-      chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-        let tTitle = noteTitle;
-        let tUrl = pageUrl;
-        if (tab?.title) {
-          tTitle = tab.title.replace(/ - YouTube$/, '');
-          setNoteTitle(tTitle);
-          noteTitleRef.current = tTitle;
-          lastSavedTitleRef.current = tTitle;
+      chrome.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+        const tabInfo = tab ? { id: tab.id, url: tab.url, title: tab.title?.replace(/ - YouTube$/, '') } : undefined;
+        setCurrentTabInfo(tabInfo);
+
+        // Get or initialize active manual session
+        const { session: currentSession } = await getOrCreateCurrentManualSession(tabInfo);
+        const allSessions = await getAllManualSessions();
+        setSessions(allSessions);
+        setActiveSession(currentSession);
+        activeSessionRef.current = currentSession;
+
+        const resolvedTitle = currentSession.obsidianFileName || currentSession.name;
+        setNoteTitle(resolvedTitle);
+        noteTitleRef.current = resolvedTitle;
+        lastSavedTitleRef.current = resolvedTitle;
+
+        if (currentSession.linkedUrl) {
+          setPageUrl(currentSession.linkedUrl);
+          pageUrlRef.current = currentSession.linkedUrl;
+        } else if (tab?.url) {
+          setPageUrl(tab.url);
+          pageUrlRef.current = tab.url;
         }
-        if (tab?.url) {
-          tUrl = tab.url;
-          setPageUrl(tUrl);
-          pageUrlRef.current = tUrl;
+
+        if (currentSession.markdown) {
+          setMarkdown(currentSession.markdown);
+          markdownRef.current = currentSession.markdown;
+          lastSavedMarkdownRef.current = currentSession.markdown;
+          lastKnownDiskContentRef.current = currentSession.markdown;
         }
-        checkAndLoadExistingNote(tTitle, tUrl);
+        if (currentSession.frames) {
+          setFrames(currentSession.frames);
+          framesRef.current = currentSession.frames;
+        }
+        if (currentSession.captionItems) {
+          setCaptionItems(currentSession.captionItems);
+          captionItemsRef.current = currentSession.captionItems;
+        }
+
+        await checkAndLoadExistingNote(resolvedTitle, currentSession.linkedUrl || tab?.url, false, currentSession.obsidianFolderPath);
 
         if (tab?.id) {
           chrome.tabs.sendMessage<ExtensionMessage, VideoStateResponse>(tab.id, {
@@ -417,35 +490,78 @@ export default function App() {
           }).catch(() => {});
         }
       }).catch(() => {});
+
+      // Track active tab changes to inform user of tab association status (never force switches sessions!)
+      tabActivatedListener = (activeInfo: chrome.tabs.TabActiveInfo) => {
+        chrome.tabs.get(activeInfo.tabId).then((tab) => {
+          if (tab) {
+            setCurrentTabInfo({
+              id: tab.id,
+              url: tab.url,
+              title: tab.title?.replace(/ - YouTube$/, ''),
+            });
+          }
+        }).catch(() => {});
+      };
+
+      tabUpdatedListener = (tabId: number, changeInfo: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => {
+        if (tab.active) {
+          setCurrentTabInfo({
+            id: tab.id,
+            url: tab.url,
+            title: tab.title?.replace(/ - YouTube$/, ''),
+          });
+        }
+      };
+
+      chrome.tabs.onActivated?.addListener(tabActivatedListener);
+      chrome.tabs.onUpdated?.addListener(tabUpdatedListener);
     }
 
     // Listen for background hotkey broadcasts and real-time video playback updates
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
-      const messageListener = (msg: ExtensionMessage) => {
+      const messageListener = (msg: ExtensionMessage, sender: chrome.runtime.MessageSender) => {
         if (msg.type === 'HOTKEY_COMMAND') {
           if (msg.command === 'capture_frame') handleCaptureFrame();
           if (msg.command === 'insert_timestamp') handleInsertTimestamp();
           if (msg.command === 'toggle_play') handleTogglePlay();
         }
         if (msg.type === 'VIDEO_TIME_UPDATE') {
-          setLiveVideoTime({
-            currentTime: msg.currentTime,
-            formattedTime: msg.formattedTime,
-            duration: msg.duration,
-            paused: msg.paused,
-          });
-          setSavedVideoPosition({
-            currentTime: msg.currentTime,
-            formattedTime: msg.formattedTime,
-            duration: msg.duration,
-            updatedAt: Date.now(),
-          });
+          // Tab-specific isolation: only track playhead from the session's bound tab or URL
+          const senderTabId = sender?.tab?.id ?? msg.tabId;
+          const senderUrl = sender?.tab?.url ?? msg.pageUrl;
+          const boundTabId = activeSessionRef.current?.linkedTabId;
+          const boundUrl = activeSessionRef.current?.linkedUrl;
+
+          const isMatch =
+            (!boundTabId && !boundUrl) ||
+            (boundTabId && senderTabId && boundTabId === senderTabId) ||
+            (boundUrl && senderUrl && boundUrl.split('#')[0] === senderUrl.split('#')[0]);
+
+          if (isMatch) {
+            setLiveVideoTime({
+              currentTime: msg.currentTime,
+              formattedTime: msg.formattedTime,
+              duration: msg.duration,
+              paused: msg.paused,
+            });
+            setSavedVideoPosition({
+              currentTime: msg.currentTime,
+              formattedTime: msg.formattedTime,
+              duration: msg.duration,
+              updatedAt: Date.now(),
+            });
+          }
         }
       };
       chrome.runtime.onMessage.addListener(messageListener);
 
       return () => {
         chrome.runtime.onMessage.removeListener(messageListener);
+        if (typeof chrome !== 'undefined' && chrome.tabs) {
+          if (tabActivatedListener) chrome.tabs.onActivated?.removeListener(tabActivatedListener);
+          if (tabUpdatedListener) chrome.tabs.onUpdated?.removeListener(tabUpdatedListener);
+        }
       };
     }
   }, []);
@@ -816,78 +932,85 @@ export default function App() {
     }
 
     try {
-      // 1. Only write new frames that haven't been saved to disk yet
-      for (const frame of currentFrames) {
-        if (!savedFrameIdsRef.current.has(frame.id)) {
-          await saveBinaryAttachment(dirHandle, frame.fileName, frame.dataUrl);
-          savedFrameIdsRef.current.add(frame.id);
+      const targetFileName = activeSessionRef.current
+        ? activeSessionRef.current.obsidianFileName
+        : (existingVaultFileName ? existingVaultFileName.replace(/\.md$/, '') : currentTitle);
+      const targetFolderPath = activeSessionRef.current ? activeSessionRef.current.obsidianFolderPath : '';
+
+      await enqueueVaultOperation(`${targetFolderPath}/${targetFileName}.md`, async () => {
+        // 1. Only write new frames that haven't been saved to disk yet
+        for (const frame of currentFrames) {
+          if (!savedFrameIdsRef.current.has(frame.id)) {
+            await saveBinaryAttachment(dirHandle!, frame.fileName, frame.dataUrl, 'attachments', 3, targetFolderPath);
+            savedFrameIdsRef.current.add(frame.id);
+          }
         }
-      }
 
-      // 2. Format content with frontmatter if not already present
-      const fullContent = currentMarkdown.startsWith('---')
-        ? currentMarkdown
-        : generateObsidianFrontmatter({
-            title: currentTitle,
-            sourceUrl: currentPageUrl,
-            tags: ['video-notes', 'study'],
-          }) + currentMarkdown;
+        // 2. Format content with frontmatter if not already present
+        const fullContent = currentMarkdown.startsWith('---')
+          ? currentMarkdown
+          : generateObsidianFrontmatter({
+              title: currentTitle,
+              sourceUrl: currentPageUrl,
+              tags: ['video-notes', 'study'],
+            }) + currentMarkdown;
 
-      // Determine target file name: prioritize matched existingVaultFileName to avoid duplicating
-      const targetFileName = existingVaultFileName
-        ? existingVaultFileName.replace(/\.md$/, '')
-        : currentTitle;
-
-      // 3. Write markdown file to Obsidian vault with optimistic concurrency control
-      const saveResult = await saveMarkdownFileNonDestructive(
-        dirHandle,
-        targetFileName,
-        fullContent,
-        {
-          allowOverwrite: false,
-          baseContent: lastKnownDiskContentRef.current,
-        }
-      );
-
-      setExistingVaultMarkdown(saveResult.finalContent);
-      setExistingVaultFileName(`${targetFileName}.md`);
-      lastKnownDiskContentRef.current = saveResult.finalContent;
-      lastKnownFileModifiedRef.current = saveResult.lastModified;
-
-      if (saveResult.wasMerged) {
-        setMarkdown(saveResult.finalContent);
-        markdownRef.current = saveResult.finalContent;
-        lastSavedMarkdownRef.current = saveResult.finalContent;
-      } else {
-        lastSavedMarkdownRef.current = saveResult.finalContent;
-      }
-
-      lastSavedTitleRef.current = currentTitle;
-      setLastSavedTime(new Date());
-      setVaultPermissionNeeded(false);
-      setHasUnsavedChanges(false);
-
-      // Persist active session snapshot to chrome.storage.local for instant reload on extension refresh
-      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        const cleanKey = 'session_' + (currentPageUrl.split('#')[0] || currentTitle);
-        chrome.storage.local.set({
-          [cleanKey]: {
-            markdown: saveResult.finalContent,
-            title: currentTitle,
-            url: currentPageUrl,
-            updatedAt: saveResult.lastModified || Date.now(),
+        // 3. Write markdown file to Obsidian vault with optimistic concurrency control
+        const saveResult = await saveMarkdownFileNonDestructive(
+          dirHandle!,
+          targetFileName,
+          fullContent,
+          {
+            allowOverwrite: false,
+            baseContent: lastKnownDiskContentRef.current,
           },
-        });
-      }
-
-      if (!silent) {
-        showStatus(
-          saveResult.wasMerged
-            ? `Safely merged with existing Obsidian note (zero data loss).`
-            : `Saved "${targetFileName}.md" and ${currentFrames.length} images to ${dirHandle.name}.`,
-          'success'
+          3,
+          targetFolderPath
         );
-      }
+
+        setExistingVaultMarkdown(saveResult.finalContent);
+        setExistingVaultFileName(`${targetFileName}.md`);
+        lastKnownDiskContentRef.current = saveResult.finalContent;
+        lastKnownFileModifiedRef.current = saveResult.lastModified;
+
+        if (saveResult.wasMerged) {
+          setMarkdown(saveResult.finalContent);
+          markdownRef.current = saveResult.finalContent;
+          lastSavedMarkdownRef.current = saveResult.finalContent;
+        } else {
+          lastSavedMarkdownRef.current = saveResult.finalContent;
+        }
+
+        lastSavedTitleRef.current = currentTitle;
+        setLastSavedTime(new Date());
+        setVaultPermissionNeeded(false);
+        setHasUnsavedChanges(false);
+
+        // Keep active manual session persisted
+        if (activeSessionRef.current) {
+          const updatedSession: ManualSession = {
+            ...activeSessionRef.current,
+            markdown: saveResult.finalContent,
+            lastSavedMarkdown: saveResult.finalContent,
+            lastSavedTime: Date.now(),
+            lastDiskModified: saveResult.lastModified,
+            frames: currentFrames,
+            captionItems: captionItemsRef.current,
+          };
+          await saveManualSession(updatedSession);
+          setActiveSession(updatedSession);
+        }
+
+        if (!silent) {
+          const destLabel = targetFolderPath ? `${targetFolderPath}/${targetFileName}.md` : `${targetFileName}.md`;
+          showStatus(
+            saveResult.wasMerged
+              ? `Safely merged with existing note: ${destLabel}`
+              : `Saved "${destLabel}" and ${currentFrames.length} images to ${dirHandle!.name}.`,
+            'success'
+          );
+        }
+      });
     } catch (err) {
       if (!silent) {
         showStatus(err instanceof Error ? err.message : 'Failed to save to local folder.', 'error');
@@ -902,6 +1025,153 @@ export default function App() {
       isSavingRef.current = false;
       setIsSaving(false);
     }
+  }
+
+  // Manual Session Handlers
+  async function handleSwitchSession(targetId: string) {
+    if (activeSessionRef.current && activeSessionRef.current.id === targetId) return;
+
+    // 1. Flush current session state
+    if (activeSessionRef.current) {
+      const snap: ManualSession = {
+        ...activeSessionRef.current,
+        markdown: markdownRef.current,
+        frames: framesRef.current,
+        captionItems: captionItemsRef.current,
+        obsidianFileName: sanitizeFileName(noteTitleRef.current),
+        lastVideoTime: liveVideoTime
+          ? { seconds: liveVideoTime.currentTime, formattedTime: liveVideoTime.formattedTime }
+          : undefined,
+      };
+      await saveManualSession(snap);
+    }
+
+    // 2. Load target session
+    const all = await getAllManualSessions();
+    const target = all.find((s) => s.id === targetId);
+    if (!target) return;
+
+    await setActiveManualSessionId(target.id);
+    setActiveSession(target);
+    activeSessionRef.current = target;
+    setSessions(all);
+
+    // 3. Set reactive states
+    const resolvedTitle = target.obsidianFileName || target.name;
+    setNoteTitle(resolvedTitle);
+    noteTitleRef.current = resolvedTitle;
+    lastSavedTitleRef.current = resolvedTitle;
+    setMarkdown(target.markdown || '');
+    markdownRef.current = target.markdown || '';
+    lastSavedMarkdownRef.current = target.markdown || '';
+    lastKnownDiskContentRef.current = target.markdown || '';
+    setFrames(target.frames || []);
+    framesRef.current = target.frames || [];
+    setCaptionItems(target.captionItems || []);
+    captionItemsRef.current = target.captionItems || [];
+    if (target.linkedUrl) {
+      setPageUrl(target.linkedUrl);
+      pageUrlRef.current = target.linkedUrl;
+    }
+    setHasUnsavedChanges(false);
+
+    // 4. Sync with Obsidian vault in target folder
+    await checkAndLoadExistingNote(resolvedTitle, target.linkedUrl, false, target.obsidianFolderPath);
+    showStatus(`Switched to session: ${target.name}`, 'info', 2500);
+  }
+
+  async function handleCreateSession(params: {
+    name: string;
+    obsidianFileName: string;
+    obsidianFolderPath: string;
+    linkToCurrentTab: boolean;
+  }) {
+    if (activeSessionRef.current) {
+      await saveManualSession({
+        ...activeSessionRef.current,
+        markdown: markdownRef.current,
+        frames: framesRef.current,
+        captionItems: captionItemsRef.current,
+      });
+    }
+
+    const created = await createManualSession({
+      name: params.name,
+      obsidianFileName: params.obsidianFileName,
+      obsidianFolderPath: params.obsidianFolderPath,
+      linkedTabId: params.linkToCurrentTab ? currentTabInfo?.id : undefined,
+      linkedUrl: params.linkToCurrentTab ? currentTabInfo?.url : undefined,
+      linkedTitle: params.linkToCurrentTab ? currentTabInfo?.title : undefined,
+    });
+
+    const all = await getAllManualSessions();
+    setSessions(all);
+    setActiveSession(created);
+    activeSessionRef.current = created;
+
+    setNoteTitle(created.obsidianFileName);
+    noteTitleRef.current = created.obsidianFileName;
+    lastSavedTitleRef.current = created.obsidianFileName;
+    setMarkdown('');
+    markdownRef.current = '';
+    lastSavedMarkdownRef.current = '';
+    lastKnownDiskContentRef.current = '';
+    setFrames([]);
+    framesRef.current = [];
+    setCaptionItems([]);
+    captionItemsRef.current = [];
+    if (created.linkedUrl) {
+      setPageUrl(created.linkedUrl);
+      pageUrlRef.current = created.linkedUrl;
+    }
+    setHasUnsavedChanges(false);
+
+    await checkAndLoadExistingNote(created.obsidianFileName, created.linkedUrl, false, created.obsidianFolderPath);
+    showStatus(`Created session: ${created.name}`, 'success', 3000);
+  }
+
+  async function handleUpdateSession(
+    id: string,
+    updates: Partial<{
+      name: string;
+      obsidianFileName: string;
+      obsidianFolderPath: string;
+      linkedTabId?: number;
+      linkedUrl?: string;
+      linkedTitle?: string;
+    }>
+  ) {
+    const all = await getAllManualSessions();
+    const idx = all.findIndex((s) => s.id === id);
+    if (idx === -1) return;
+
+    const updated = { ...all[idx], ...updates, updatedAt: Date.now() };
+    all[idx] = updated;
+    await saveManualSession(updated);
+    setSessions([...all]);
+
+    if (activeSessionRef.current?.id === id) {
+      setActiveSession(updated);
+      activeSessionRef.current = updated;
+      if (updates.obsidianFileName) {
+        setNoteTitle(updates.obsidianFileName);
+        noteTitleRef.current = updates.obsidianFileName;
+      }
+    }
+    showStatus('Session updated.', 'success', 2000);
+  }
+
+  async function handleDeleteSession(id: string) {
+    await deleteManualSession(id);
+    const all = await getAllManualSessions();
+    setSessions(all);
+    if (activeSessionRef.current?.id === id) {
+      const next = all.length > 0 ? all[0] : null;
+      if (next) {
+        await handleSwitchSession(next.id);
+      }
+    }
+    showStatus('Session deleted.', 'info', 2000);
   }
 
   // Detect unsaved changes
@@ -976,23 +1246,79 @@ export default function App() {
           padding: '8px 10px',
           background: 'var(--bg-secondary)',
           borderBottom: '1px solid var(--border-color)',
+          gap: '8px',
         }}
       >
-        <input
-          type="text"
-          className="input-field"
-          value={noteTitle}
-          onChange={(e) => setNoteTitle(e.target.value)}
-          placeholder="Note Title"
-          style={{
-            fontWeight: 600,
-            fontSize: '13px',
-            border: 'none',
-            background: 'transparent',
-            padding: '4px 6px',
-            color: '#fff',
-          }}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1, minWidth: 0 }}>
+          {/* Session Switcher Pill */}
+          <button
+            className="btn"
+            onClick={() => setIsSessionModalOpen(true)}
+            style={{
+              padding: '3px 8px',
+              fontSize: '11px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              background: 'rgba(99, 102, 241, 0.12)',
+              borderColor: 'rgba(99, 102, 241, 0.3)',
+              color: '#c7d2fe',
+              maxWidth: '150px',
+              flexShrink: 0,
+            }}
+            title="Manage and switch study sessions"
+          >
+            <Layers size={12} color="var(--accent-primary)" />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+              {activeSession ? activeSession.name : 'Sessions'}
+            </span>
+          </button>
+
+          {/* Active Tab Association Indicator */}
+          {activeSession && (
+            <span
+              style={{
+                fontSize: '10px',
+                padding: '2px 6px',
+                borderRadius: '4px',
+                background: isLinkedToActiveTab ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+                color: isLinkedToActiveTab ? '#34d399' : '#fbbf24',
+                border: `1px solid ${isLinkedToActiveTab ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+              }}
+              onClick={() => setIsSessionModalOpen(true)}
+              title={isLinkedToActiveTab ? 'Session linked to current active tab' : 'Active tab differs from session. Click to manage/re-link.'}
+            >
+              {isLinkedToActiveTab ? '● Linked' : '⚠ Different Tab'}
+            </span>
+          )}
+
+          <input
+            type="text"
+            className="input-field"
+            value={noteTitle}
+            onChange={(e) => {
+              setNoteTitle(e.target.value);
+              if (activeSessionRef.current) {
+                activeSessionRef.current.obsidianFileName = sanitizeFileName(e.target.value);
+                saveManualSession(activeSessionRef.current).catch(() => {});
+              }
+            }}
+            placeholder="Note Title"
+            style={{
+              fontWeight: 600,
+              fontSize: '13px',
+              border: 'none',
+              background: 'transparent',
+              padding: '4px 6px',
+              color: '#fff',
+              flex: 1,
+              minWidth: '70px',
+            }}
+          />
+        </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           {vaultPermissionNeeded && (
@@ -1210,7 +1536,7 @@ export default function App() {
 
       {/* Main Tab Content Area */}
       <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {activeTab === 'editor' && (
+        <div style={{ display: activeTab === 'editor' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
           <Editor
             markdown={markdown}
             onChange={setMarkdown}
@@ -1218,9 +1544,9 @@ export default function App() {
             onSeek={handleSeek}
             framesMap={framesMap}
           />
-        )}
+        </div>
 
-        {activeTab === 'gallery' && (
+        <div style={{ display: activeTab === 'gallery' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
           <FrameGallery
             frames={frames}
             onSeek={handleSeek}
@@ -1228,9 +1554,9 @@ export default function App() {
             onDeleteFrame={handleDeleteFrame}
             analyzingFrameId={analyzingFrameId}
           />
-        )}
+        </div>
 
-        {activeTab === 'captions' && (
+        <div style={{ display: activeTab === 'captions' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
           <LiveCaptionsTab
             onInsertIntoNotes={(text) => {
               setMarkdown((prev) => (prev ? `${prev}${text}` : text.trimStart()));
@@ -1238,6 +1564,17 @@ export default function App() {
             }}
             onSeek={handleSeek}
             pageUrl={pageUrl}
+            linkedTabId={activeSession?.linkedTabId}
+            linkedUrl={activeSession?.linkedUrl}
+            captionItems={captionItems}
+            onUpdateCaptionItems={(items) => {
+              setCaptionItems(items);
+              captionItemsRef.current = items;
+              if (activeSessionRef.current) {
+                activeSessionRef.current.captionItems = items;
+                saveManualSession(activeSessionRef.current).catch(() => {});
+              }
+            }}
             onSummarizeWithAI={async (transcript) => {
               if (!apiKey.trim()) {
                 showStatus('Enter your Gemini API key in Settings first.', 'error');
@@ -1272,9 +1609,9 @@ export default function App() {
             }}
             onOpenSettings={() => setIsSettingsOpen(true)}
           />
-        )}
+        </div>
 
-        {activeTab === 'chat' && (
+        <div style={{ display: activeTab === 'chat' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
           <AIAssistant
             apiKey={apiKey}
             model={selectedModel}
@@ -1285,7 +1622,7 @@ export default function App() {
             onInsertIntoNotes={(text) => setMarkdown((prev) => prev + text)}
             onOpenSettings={() => setIsSettingsOpen(true)}
           />
-        )}
+        </div>
       </div>
 
       {/* Persistent Status Toast Bar */}
@@ -1359,6 +1696,20 @@ export default function App() {
           onMergeWithVault={() => performSaveToVault(false)}
           onInsertSnippet={(text) => setMarkdown((prev) => prev + text)}
           onClose={() => setIsReviewOpen(false)}
+        />
+      )}
+
+      {/* Session Manager Modal */}
+      {isSessionModalOpen && (
+        <SessionManagerModal
+          sessions={sessions}
+          activeSessionId={activeSession?.id || null}
+          currentTabInfo={currentTabInfo}
+          onSelectSession={handleSwitchSession}
+          onCreateSession={handleCreateSession}
+          onUpdateSession={handleUpdateSession}
+          onDeleteSession={handleDeleteSession}
+          onClose={() => setIsSessionModalOpen(false)}
         />
       )}
     </div>
