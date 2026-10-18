@@ -21,6 +21,7 @@
 - 🎙️ **Real-Time Chrome Live Captions**: Stream live on-device speech-to-text directly from **Chrome Live Caption** (`chrome://settings/accessibility`) into your notes with synchronized timestamps. Features intelligent delta-deduplication so only fresh sentences are captured.
 - 🎓 **Canvas LMS & Video.js Support**: Deep integration with Canvas LMS course pages, Canvas Studio embeds, and Video.js players across nested iframes with accurate time sync and closed-caption scraping.
 - 📝 **Dual Edit & Live Preview Editor**: Split-mode Markdown editor with live image rendering, clickable timestamp anchors, and note templates (Cornell Notes, Lecture Notes, Obsidian Flashcards Deck).
+- 🗂️ **Manual Multi-Session Manager & Obsidian Folder Linking**: Create, name, switch, and delete multiple note-taking sessions at will. Link each session to an independent Obsidian file and custom vault subfolder (e.g. `Courses/Physics/`) without interfering with other notes. Features strict **tab isolation**—each session is linked to its specific browser tab so live speech captions, timestamps, and frames never cross-contaminate between tabs.
 - 💎 **Non-Destructive Vault Sync & Auto-Save**: Uses the **HTML5 File System Access API** (`showDirectoryPicker`) to save `.md` files and `.webp` attachments straight to your local Obsidian folder without any cloud intermediary. Features intelligent **non-destructive merging** with zero data loss—never overwriting your past progress or duplicating timestamps when returning to a video. Includes debounced real-time saving (2.5s) and a 15-second heartbeat auto-save with in-memory handle persistence.
 - 🔍 **Review Note & Timestamps Timeline**: Dedicated Review modal and top banner strip displaying all timestamps noted in your Obsidian file. Search note text, preview rendered Markdown, copy snippet blocks, or hit **"Resume at [MM:SS]"** to instantly continue the lecture where you previously left off. Rehydrates past frame attachments from disk across refreshes.
 - 🧠 **Multimodal AI Companion (Gemini 3.8 / 2.0 Flash)**:
@@ -127,6 +128,7 @@ video_notes_00/
 │       │   ├── LiveCaptionsTab.tsx # Live Chrome & Canvas caption stream
 │       │   ├── AIAssistant.tsx     # Gemini multimodal chat & summaries
 │       │   ├── ReviewNoteModal.tsx # Obsidian review modal with timeline & resume action
+│       │   ├── SessionManagerModal.tsx # Manual session manager, folder linking & tab switcher
 │       │   ├── Toolbar.tsx         # Quick action controls
 │       │   └── SettingsModal.tsx   # Vault, API keys & templates config
 │       └── styles/
@@ -135,10 +137,13 @@ video_notes_00/
 │   ├── geminiClient.ts             # Gemini 3.8/2.0 multimodal vision & transcript API
 │   ├── messaging.ts                # Type-safe extension message protocol
 │   ├── noteMerge.ts                # Non-destructive vault merging & strict timestamp parsing
+│   ├── sessionManager.ts           # Manual session registry, folder sanitizers & state storage
 │   ├── templates.ts                # Cornell, lecture & flashcard templates
 │   ├── transcriptExtractor.ts      # Canvas, Video.js & YouTube caption extractor & delta parser
+│   ├── vaultQueue.ts               # Mutex-locked thread-safe write queue for multi-session file safety
 │   └── vaultStorage.ts             # Local-first Obsidian vault file writer
 ├── tests/
+│   ├── manualSessions.test.ts      # Unit tests for session CRUD, folder paths & tab isolation
 │   ├── noteMerge.test.ts           # Tests for non-destructive merge & timestamp parsing
 │   ├── utils.test.ts               # Vitest unit test suite (formatting, parsing, deduplication)
 │   └── vaultStorage.test.ts        # Obsidian vault writer, Wikilink & attachment tests
@@ -164,6 +169,7 @@ video_notes_00/
 - [x] Obsidian attachment rehydration across browser sessions
 - [x] Real-time playhead seek tracking & persistent "Resume at [MM:SS]"
 - [x] Review Note modal with chronological timestamp timeline & live markdown preview
+- [x] Manual Multi-Session Manager with custom Obsidian folder path linking & tab isolation
 - [x] Obsidian note templates (Cornell Notes, Lecture Notes, Flashcards Deck)
 - [x] Real-time & periodic auto-saving directly to local Obsidian vault
 - [ ] YouTube chapter & playlist auto-indexing

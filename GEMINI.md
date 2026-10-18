@@ -92,6 +92,7 @@ video_notes_00/
 │       │   ├── LiveCaptionsTab.tsx # Live Chrome & Web caption stream with delta deduplication
 │       │   ├── AIAssistant.tsx     # Gemini multimodal chat & transcript summarizer
 │       │   ├── ReviewNoteModal.tsx # Obsidian review modal with chronological timeline & resume action
+│       │   ├── SessionManagerModal.tsx # Manual session manager, vault folder linking & tab switcher
 │       │   ├── Toolbar.tsx         # Fast access action bar
 │       │   └── SettingsModal.tsx   # Obsidian vault connector & API configuration
 │       └── styles/
@@ -100,10 +101,13 @@ video_notes_00/
 │   ├── geminiClient.ts             # Gemini 2.0/2.5 Flash multimodal vision & transcript API
 │   ├── messaging.ts                # Type-safe extension message definitions
 │   ├── noteMerge.ts                # Non-destructive vault merging, strict timestamp parsing & attachment rehydration
+│   ├── sessionManager.ts           # Manual session registry, folder sanitizers & state storage
 │   ├── templates.ts                # Cornell, lecture & flashcard templates
 │   ├── transcriptExtractor.ts      # Multi-tier caption extractor (textTracks, YouTube DOM, API)
+│   ├── vaultQueue.ts               # Mutex-locked thread-safe write queue for multi-session file safety
 │   └── vaultStorage.ts             # Obsidian vault writer, Wikilink generator, image saver
 ├── tests/
+│   ├── manualSessions.test.ts      # Unit tests for session CRUD, folder paths & tab isolation
 │   ├── noteMerge.test.ts           # Non-destructive merge, frontmatter isolation & timestamp tests
 │   ├── utils.test.ts               # Timestamp formatting, seek parsing & caption deduplication tests
 │   └── vaultStorage.test.ts        # Obsidian vault writer, Wikilink & attachment tests
@@ -146,6 +150,13 @@ video_notes_00/
 - Connects to Windows UI Automation (`uiautomation`) to read Chrome's floating Live Caption window (`Chrome_WidgetWin_1`).
 - Runs a local WebSocket server at `ws://localhost:8765`.
 - Broadcasts real-time transcript chunks directly to `LiveCaptionsTab.tsx` with delta-deduplication, allowing seamless note-taking even when YouTube or third-party web captions are unavailable or closed.
+
+### 5. Manual Multi-Session Management, Folder Linking & Tab Isolation (`utils/sessionManager.ts`, `utils/vaultQueue.ts`)
+- **User-Controlled Sessions**: Replaces erratic URL-based auto-switching with an explicit, predictable multi-session manager. Users can create, switch, rename, re-link, or delete sessions at will via `SessionManagerModal`.
+- **Target Folder Linking (`folderPath`)**: Each session can link to a custom subfolder inside the Obsidian vault (e.g., `Courses/Math/`). Uses `resolveDirectoryHandle` to traverse and create nested directory handles via the File System Access API.
+- **Per-Session Attachment Routing**: Image snapshots are saved into the session's folder under `attachments/` (e.g. `Courses/Math/attachments/`), seamlessly falling back to root `attachments/` for maximum portability.
+- **Strict Tab Isolation**: Each session tracks its associated browser tab (`linkedTabId` and `linkedUrl`). Incoming live speech captions and Web captions are strictly filtered so background tabs or other video tabs never leak into or corrupt the active session.
+- **Thread-Safe Mutex Write Queue (`vaultQueue.ts`)**: Serializes concurrent background auto-saves and manual writes per-file to eliminate file lock collisions on Windows.
 
 ---
 
