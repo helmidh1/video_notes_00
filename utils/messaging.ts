@@ -5,7 +5,27 @@ export type ExtensionMessage =
   | { type: 'TOGGLE_PLAY' }
   | { type: 'SET_PLAYBACK_RATE'; rate: number }
   | { type: 'EXTRACT_TRANSCRIPT' }
+  | { type: 'START_LIVE_CAPTIONS' }
+  | { type: 'STOP_LIVE_CAPTIONS' }
+  | { type: 'LIVE_WEB_CAPTION'; text: string; timestamp: number; formattedTime: string }
+  | {
+      type: 'VIDEO_TIME_UPDATE';
+      currentTime: number;
+      formattedTime: string;
+      duration: number;
+      paused?: boolean;
+      pageUrl?: string;
+    }
   | { type: 'HOTKEY_COMMAND'; command: string };
+
+export interface LiveCaptionItem {
+  id: string;
+  text: string;
+  timestamp: number;
+  formattedTime: string;
+  isFinal: boolean;
+  source: 'chrome-live-caption' | 'windows-live-caption' | 'web-caption';
+}
 
 export interface VideoStateResponse {
   ok: boolean;

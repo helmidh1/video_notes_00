@@ -55,9 +55,9 @@ To achieve the best possible developer and user experience, the following free t
 
 ### 3. Core Free Libraries & Tech Stack
 - **Extension Engine**: **WXT** (`wxt.config.ts`) with Chromium MV3, TypeScript, and Vite.
-- **Frontend UI**: React 18/19, Lucide Icons (`lucide-react`), TailwindCSS or Custom Glassmorphic CSS.
-- **Multimodal AI**: **Google Gen AI SDK** (`@google/genai`) using **Gemini 2.0 Flash / 2.5 Flash** (Free tier on Google AI Studio: 15 RPM, 1M TPM, 1,500 RPD).
-- **Offline / Local AI**: **Chrome Built-in AI** (`window.ai` / Prompt API via Gemini Nano) as a zero-cost, local-first fallback.
+- **Frontend UI**: React 18/19, Lucide Icons (`lucide-react`), Dark Glassmorphic CSS design tokens.
+- **Multimodal AI**: **Google Gen AI SDK** (`@google/genai`) using **Gemini 2.5 / 2.0 Flash / Pro** (Free tier on Google AI Studio: 15 RPM, 1M TPM, 1,500 RPD).
+- **Offline / Local AI**: **Chrome Built-in AI** (`window.ai` / Prompt API via Gemini Nano) and **Chrome Live Caption** companion bridge.
 - **Local Storage & File I/O**: File System Access API (`showDirectoryPicker`) + `idb-keyval` for persistent directory handles.
 - **Markdown & Preview**: Split-pane / toggleable live Markdown previewer with syntax highlighting and clickable timestamp seek anchors.
 
@@ -74,32 +74,75 @@ video_notes_00/
 │       ├── wxt-extension-dev/
 │       ├── obsidian-markdown-spec/
 │       └── gemini-multimodal-assistant/
+├── companion/                      # Live Caption Desktop Bridge
+│   ├── caption_bridge.py           # Windows UIA live caption WebSocket server (ws://localhost:8765)
+│   └── run_bridge.bat              # Quick start batch launcher
 ├── entrypoints/
 │   ├── background.ts               # Side Panel behavior, CORS screenshot fallback handler
-│   ├── content.ts                  # Resilient video player detector, DOM observer, timestamp sync
+│   ├── content.ts                  # Multi-video player detector, DOM observer, timestamp sync & WebVTT captions
 │   └── sidepanel/                  # Premium React note-taking workspace
-│       ├── App.tsx                 # Core sidepanel state & layout
+│       ├── App.tsx                 # Core sidepanel state, live playhead banner & non-destructive vault loader
 │       ├── index.html              # HTML container
 │       ├── main.tsx               # React mount root
 │       ├── components/
-│       │   ├── Editor/             # Markdown editor with timestamp hotkeys & live preview
-│       │   ├── FrameGallery/       # Captured frames with OCR, Explain, and Seek actions
-│       │   ├── AIAssistant/        # Gemini multimodal chat & transcript summarizer
-│       │   ├── VaultManager/       # File System Access API directory connector
-│       │   └── UI/                 # Glowing buttons, badges, modals, status toasts
-│       └── styles/                 # Dark glassmorphic tokens & typography
+│       │   ├── Editor.tsx          # Markdown editor with timestamp hotkeys & live preview
+│       │   ├── FrameGallery.tsx    # Captured frames with OCR, Explain, and Seek actions
+│       │   ├── LiveCaptionsTab.tsx # Live Chrome & Web caption stream with delta deduplication
+│       │   ├── AIAssistant.tsx     # Gemini multimodal chat & transcript summarizer
+│       │   ├── ReviewNoteModal.tsx # Obsidian review modal with chronological timeline & resume action
+│       │   ├── Toolbar.tsx         # Fast access action bar
+│       │   └── SettingsModal.tsx   # Obsidian vault connector & API configuration
+│       └── styles/
+│           └── theme.css           # Dark glassmorphic tokens & typography
 ├── utils/
 │   ├── geminiClient.ts             # Gemini 2.0/2.5 Flash multimodal vision & transcript API
 │   ├── messaging.ts                # Type-safe extension message definitions
+│   ├── noteMerge.ts                # Non-destructive vault merging, strict timestamp parsing & attachment rehydration
+│   ├── templates.ts                # Cornell, lecture & flashcard templates
 │   ├── transcriptExtractor.ts      # Multi-tier caption extractor (textTracks, YouTube DOM, API)
-│   ├── videoController.ts          # Video detection, seek, playback rate, CORS fallback
 │   └── vaultStorage.ts             # Obsidian vault writer, Wikilink generator, image saver
+├── tests/
+│   ├── noteMerge.test.ts           # Non-destructive merge, frontmatter isolation & timestamp tests
+│   └── utils.test.ts               # Timestamp formatting, seek parsing & caption deduplication tests
 ├── package.json                    # Project dependencies and build scripts
 ├── tsconfig.json                   # Strict TypeScript configuration
 ├── wxt.config.ts                   # WXT Manifest V3 extension configuration
 ├── GEMINI.md                       # This agent operating guide
 └── README.md                       # Public-facing user & developer documentation
 ```
+
+---
+
+## 🧩 Core Architectural Subsystems
+
+### 1. Non-Destructive Vault Merging & Attachment Rehydration (`utils/noteMerge.ts`)
+- **Safety Guarantee**: Saving to an existing Obsidian note never wipes, truncates, or blindly overwrites content.
+- **Content Matching**: Locates existing files by matching sanitized titles or `url:` in the YAML frontmatter.
+- **Intelligent Diff Merging**:
+  - Preserves user edits made in Obsidian outside the browser.
+  - Appends new timestamped sections and snapshot attachments seamlessly.
+  - Automatically rehydrates captured frame images from the vault's attachment directory (`attachments/`) across browser sessions and reloads.
+
+### 2. Accurate Video Player Detection & Real-Time Playhead Tracking (`entrypoints/content.ts`)
+- **Targeted Selector**: Explicitly prioritizes main video players:
+  1. `video.html5-main-video` (YouTube primary player)
+  2. `video.vjs-tech` (Canvas LMS / Canvas Studio / Video.js)
+  3. Playing video elements with rendered area `> 15,000 px²` (filtering out 160×90 hover preview thumbnails)
+- **Continuous Event Hooking**:
+  - Subscribes to `seeked`, `pause`, `play`, and `timeupdate` events.
+  - Broadcasts `VIDEO_TIME_UPDATE` to the extension runtime.
+  - Automatically caches the last playback position in `chrome.storage.local` under `video_pos_${cleanUrl}`.
+  - Hooks SPA navigation via `yt-navigate-finish` and `popstate` to keep track across internal YouTube navigations.
+
+### 3. Frontmatter Isolation & Strict Timestamp Parsing
+- **Frontmatter Stripping**: Extracts and isolates YAML frontmatter prior to regex parsing, preventing ISO timestamp strings (e.g. `updated: 2026-10-17T20:53:05.123Z`) from being parsed as 20-hour video timestamps.
+- **Strict Validation**: Requires seconds to strictly match `[0-5]\d` (`00-59`).
+- **Ordered Last Note Lookup**: `getLastRecordedTimestamp(markdown)` retrieves the most recently appended note entry in document order rather than just the mathematical maximum second.
+
+### 4. Chrome Live Caption Desktop Bridge (`companion/caption_bridge.py`)
+- Connects to Windows UI Automation (`uiautomation`) to read Chrome's floating Live Caption window (`Chrome_WidgetWin_1`).
+- Runs a local WebSocket server at `ws://localhost:8765`.
+- Broadcasts real-time transcript chunks directly to `LiveCaptionsTab.tsx` with delta-deduplication, allowing seamless note-taking even when YouTube or third-party web captions are unavailable or closed.
 
 ---
 
@@ -117,8 +160,7 @@ video_notes_00/
 3. **Keyboard-First Experience**:
    - `Alt+S`: Capture frame snapshot and insert into note.
    - `Alt+T`: Insert interactive timestamp `[MM:SS]` at cursor position.
-   - `Alt+Space`: Play / Pause video without leaving the note editor.
-   - `Alt+J` / `Alt+K`: Jump backward / forward 5 seconds.
+   - `Alt+P`: Play / Pause video without leaving the note editor.
 
 4. **Privacy & Security**:
    - API keys stored securely in `chrome.storage.local`.

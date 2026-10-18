@@ -21,6 +21,66 @@ export function parseTimeStringToSeconds(timeStr: string): number {
   return parts[0] || 0;
 }
 
+/**
+ * Given the previously accumulated text and a new text chunk from a rolling caption window,
+ * extracts ONLY the newly added delta/suffix without duplicating prior text.
+ */
+export function extractDeltaText(accumulatedText: string, incomingText: string): string {
+  const cleanIncoming = incomingText.replace(/\s+/g, ' ').trim();
+  const cleanAcc = accumulatedText.replace(/\s+/g, ' ').trim();
+
+  if (!cleanAcc) return cleanIncoming;
+  if (!cleanIncoming) return '';
+  if (cleanIncoming === cleanAcc) return '';
+
+  // 1. Direct prefix match: incoming starts with accumulated text
+  if (cleanIncoming.startsWith(cleanAcc)) {
+    const delta = cleanIncoming.substring(cleanAcc.length).replace(/^[\s,;.-]+/, '').trim();
+    return delta;
+  }
+
+  // 2. Normalize words for fuzzy overlap check (handling punctuation and rolling window where older words fell off)
+  const normalize = (w: string) => w.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  const wordsIncoming = cleanIncoming.split(/\s+/);
+  const wordsAcc = cleanAcc.split(/\s+/);
+
+  const normIncoming = wordsIncoming.map(normalize);
+  const normAcc = wordsAcc.map(normalize);
+
+  // Check if incoming text is completely contained inside accumulated text
+  const fullNormIncoming = normIncoming.filter(Boolean).join(' ');
+  const fullNormAcc = normAcc.filter(Boolean).join(' ');
+  if (fullNormAcc.endsWith(fullNormIncoming) || fullNormAcc.includes(fullNormIncoming)) {
+    return '';
+  }
+
+  // Find longest suffix of normAcc matching prefix of normIncoming
+  const maxCheck = Math.min(wordsIncoming.length, wordsAcc.length);
+  for (let len = maxCheck; len >= 1; len--) {
+    const sliceAcc = normAcc.slice(-len);
+    const sliceInc = normIncoming.slice(0, len);
+
+    let match = true;
+    for (let i = 0; i < len; i++) {
+      if (!sliceAcc[i] || !sliceInc[i] || sliceAcc[i] !== sliceInc[i]) {
+        match = false;
+        break;
+      }
+    }
+
+    if (match) {
+      // The first `len` words of incoming were already in accumulated
+      const remainingWords = wordsIncoming.slice(len);
+      const delta = remainingWords.join(' ').replace(/^[\s,;.-]+/, '').trim();
+      return delta;
+    }
+  }
+
+  // No overlap found (e.g. after a long pause or topic change)
+  return cleanIncoming;
+}
+
 function extractFromTextTracks(video: HTMLVideoElement): TranscriptSegment[] {
   const segments: TranscriptSegment[] = [];
   const tracks = Array.from(video.textTracks || []);
@@ -78,6 +138,55 @@ function extractFromYouTubeDOM(): TranscriptSegment[] {
   return segments;
 }
 
+function extractFromCanvasDOM(): TranscriptSegment[] {
+  const segments: TranscriptSegment[] = [];
+
+  // 1. Check Canvas Studio / Video.js transcript drawer or list
+  const items = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      '[class*="transcript-item"], [class*="transcript-line"], .transcript-content li, [data-testid*="transcript-line"], .vjs-transcription-item, [class*="studio-transcript"] tr, [class*="studio-transcript"] li'
+    )
+  );
+
+  for (const item of items) {
+    const timeEl = item.querySelector('[class*="time"], [class*="timestamp"], button, .timestamp');
+    const textEl = item.querySelector('[class*="text"], [class*="cue"], [class*="content"]') || item;
+
+    const rawTime = timeEl?.textContent?.trim() || '';
+    let cleanText = textEl?.textContent?.replace(/\s+/g, ' ').trim() || '';
+
+    if (rawTime && cleanText.startsWith(rawTime)) {
+      cleanText = cleanText.substring(rawTime.length).trim();
+    }
+
+    if (cleanText) {
+      const startTime = parseTimeStringToSeconds(rawTime);
+      segments.push({
+        startTime,
+        formattedTime: formatSeconds(startTime),
+        text: cleanText,
+      });
+    }
+  }
+
+  // 2. Check active Video.js text track cue overlays in DOM
+  if (segments.length === 0) {
+    const cues = Array.from(document.querySelectorAll<HTMLElement>('.vjs-text-track-cue, [class*="vjs-text-track-display"] div'));
+    for (const cue of cues) {
+      const text = cue.textContent?.replace(/\s+/g, ' ').trim();
+      if (text && !segments.some((s) => s.text === text)) {
+        segments.push({
+          startTime: 0,
+          formattedTime: '00:00',
+          text,
+        });
+      }
+    }
+  }
+
+  return segments;
+}
+
 // Attempt to trigger opening the transcript drawer on YouTube if currently closed
 function attemptOpenYouTubeTranscript(): void {
   // Try finding the transcript button in the description section
@@ -103,6 +212,10 @@ export function extractVideoTranscript(video?: HTMLVideoElement): TranscriptResp
 
   if (segments.length === 0) {
     segments = extractFromYouTubeDOM();
+  }
+
+  if (segments.length === 0) {
+    segments = extractFromCanvasDOM();
   }
 
   if (segments.length === 0) {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatSeconds, parseTimeStringToSeconds } from '../utils/transcriptExtractor';
+import { formatSeconds, parseTimeStringToSeconds, extractDeltaText } from '../utils/transcriptExtractor';
 import { generateTemplate } from '../utils/templates';
 import { generateObsidianFrontmatter } from '../utils/vaultStorage';
 
@@ -90,3 +90,52 @@ describe('Gemini Model Configuration', () => {
     await saveGeminiModel('gemini-3.8-flash');
   });
 });
+
+describe('Live Captions Integration', () => {
+  it('correctly associates time stamps with caption segments', () => {
+    const timeInSec = 92;
+    const formatted = formatSeconds(timeInSec);
+    expect(formatted).toBe('01:32');
+    const markdownLine = `- [${formatted}](https://example.com/video#t=${timeInSec}s) Real-time caption text`;
+    expect(markdownLine).toBe('- [01:32](https://example.com/video#t=92s) Real-time caption text');
+  });
+
+  it('correctly parses Canvas LMS video timestamps and formats them', () => {
+    expect(parseTimeStringToSeconds('04:15')).toBe(255);
+    expect(parseTimeStringToSeconds('1:22:10')).toBe(4930);
+    expect(formatSeconds(255)).toBe('04:15');
+    expect(formatSeconds(4930)).toBe('1:22:10');
+  });
+
+  it('extracts only newly spoken delta without rewriting prior text', () => {
+    const chunk1 = "Recording I? All right. So, yeah, we're going to be talking about the Cyber bit range that we'll be using in our classes.";
+    const chunk2 = `${chunk1} Hello, hello, and welcome. We're just getting started.`;
+    const chunk3 = `${chunk2} So, if we go to the next slide, we'll talk about access.`;
+
+    // First entry: no prior text
+    const delta1 = extractDeltaText('', chunk1);
+    expect(delta1).toBe(chunk1);
+
+    // Second entry: should only return sentence 2
+    const delta2 = extractDeltaText(chunk1, chunk2);
+    expect(delta2).toBe("Hello, hello, and welcome. We're just getting started.");
+
+    // Third entry: should only return sentence 3
+    const accumulated = `${chunk1} ${delta2}`;
+    const delta3 = extractDeltaText(accumulated, chunk3);
+    expect(delta3).toBe("So, if we go to the next slide, we'll talk about access.");
+
+    // Identical entry: should return empty string
+    const deltaDup = extractDeltaText(chunk3, chunk3);
+    expect(deltaDup).toBe('');
+  });
+
+  it('handles rolling window buffers where oldest words scroll off', () => {
+    const accumulated = "one two three four five six seven eight nine ten";
+    const rollingIncoming = "six seven eight nine ten eleven twelve thirteen";
+
+    const delta = extractDeltaText(accumulated, rollingIncoming);
+    expect(delta).toBe("eleven twelve thirteen");
+  });
+});
+

@@ -17,3 +17,9 @@ Thumbs.db
 # Temporary & scrap files
 scrap.txt
 *.tmp
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
