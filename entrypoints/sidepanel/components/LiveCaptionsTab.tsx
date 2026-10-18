@@ -72,6 +72,17 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
   const lastCommittedTextRef = useRef<string>('');
   const accumulatedTextRef = useRef<string>('');
 
+  const isRecordingRef = useRef(isRecording);
+  isRecordingRef.current = isRecording;
+  const autoAppendRef = useRef(autoAppend);
+  autoAppendRef.current = autoAppend;
+  const pageUrlRef = useRef(pageUrl);
+  pageUrlRef.current = pageUrl;
+  const sessionKeyRef = useRef(sessionKey);
+  sessionKeyRef.current = sessionKey;
+  const audibleSessionKeyRef = useRef(audibleSessionKey);
+  audibleSessionKeyRef.current = audibleSessionKey;
+
   // Reset rolling text buffer when sessionKey changes to prevent cross-tab text overlap
   useEffect(() => {
     setActiveLiveText('');
@@ -130,7 +141,7 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
         };
 
         ws.onmessage = async (evt) => {
-          if (!isMounted || !isRecording) return;
+          if (!isMounted || !isRecordingRef.current) return;
           try {
             const data = JSON.parse(evt.data);
 
@@ -140,7 +151,11 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
               setBridgeSource(null);
             } else if (data.type === 'CAPTION_UPDATE') {
               // If an audible session is explicitly tracked and is not this tab, ignore
-              if (audibleSessionKey && sessionKey && audibleSessionKey !== sessionKey) {
+              if (
+                audibleSessionKeyRef.current &&
+                sessionKeyRef.current &&
+                audibleSessionKeyRef.current !== sessionKeyRef.current
+              ) {
                 return;
               }
 
@@ -172,8 +187,8 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
                 setCaptionItems((prev) => [...prev, newItem]);
                 setActiveLiveText('');
 
-                if (autoAppend) {
-                  const line = `\n- [${formattedTime}](${pageUrl}#t=${Math.floor(timestamp)}s) ${delta}`;
+                if (autoAppendRef.current) {
+                  const line = `\n- [${formattedTime}](${pageUrlRef.current}#t=${Math.floor(timestamp)}s) ${delta}`;
                   onInsertIntoNotes(line);
                 }
               }
@@ -213,7 +228,7 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
         socketRef.current = null;
       }
     };
-  }, [isRecording, autoAppend, pageUrl]);
+  }, []);
 
   // Start in-browser closed caption fallback observer
   useEffect(() => {

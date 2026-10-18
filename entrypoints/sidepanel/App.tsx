@@ -1474,7 +1474,7 @@ export default function App() {
 
       {/* Main Tab Content Area */}
       <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {activeTab === 'editor' && (
+        <div style={{ display: activeTab === 'editor' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
           <Editor
             markdown={markdown}
             onChange={setMarkdown}
@@ -1482,9 +1482,9 @@ export default function App() {
             onSeek={handleSeek}
             framesMap={framesMap}
           />
-        )}
+        </div>
 
-        {activeTab === 'gallery' && (
+        <div style={{ display: activeTab === 'gallery' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
           <FrameGallery
             frames={frames}
             onSeek={handleSeek}
@@ -1492,9 +1492,9 @@ export default function App() {
             onDeleteFrame={handleDeleteFrame}
             analyzingFrameId={analyzingFrameId}
           />
-        )}
+        </div>
 
-        {activeTab === 'captions' && (
+        <div style={{ display: activeTab === 'captions' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
           <LiveCaptionsTab
             onInsertIntoNotes={(text) => {
               setMarkdown((prev) => (prev ? `${prev}${text}` : text.trimStart()));
@@ -1540,9 +1540,9 @@ export default function App() {
             }}
             onOpenSettings={() => setIsSettingsOpen(true)}
           />
-        )}
+        </div>
 
-        {activeTab === 'chat' && (
+        <div style={{ display: activeTab === 'chat' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}>
           <AIAssistant
             apiKey={apiKey}
             model={selectedModel}
@@ -1553,7 +1553,7 @@ export default function App() {
             onInsertIntoNotes={(text) => setMarkdown((prev) => prev + text)}
             onOpenSettings={() => setIsSettingsOpen(true)}
           />
-        )}
+        </div>
       </div>
 
       {/* Persistent Status Toast Bar */}
