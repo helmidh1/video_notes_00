@@ -1,5 +1,5 @@
 import React from 'react';
-import { Camera, Clock, Play, Pause, Sparkles, FolderDown, Settings, Eye, Edit3 } from 'lucide-react';
+import { Camera, Clock, Play, Pause, Sparkles, FolderDown, Settings, Eye, Edit3, Check, RefreshCw, BookOpen } from 'lucide-react';
 
 interface ToolbarProps {
   onCaptureFrame: () => void;
@@ -8,11 +8,14 @@ interface ToolbarProps {
   onSummarizeTranscript: () => void;
   onSaveToVault: () => void;
   onOpenSettings: () => void;
+  onOpenReview?: () => void;
+  timestampsCount?: number;
   isPreviewMode: boolean;
   onTogglePreview: () => void;
   isPlaying: boolean;
   isSummarizing: boolean;
   isSaving: boolean;
+  hasUnsavedChanges?: boolean;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -22,11 +25,14 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onSummarizeTranscript,
   onSaveToVault,
   onOpenSettings,
+  onOpenReview,
+  timestampsCount = 0,
   isPreviewMode,
   onTogglePreview,
   isPlaying,
   isSummarizing,
   isSaving,
+  hasUnsavedChanges = false,
 }) => {
   return (
     <div
@@ -83,6 +89,25 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+        {onOpenReview && (
+          <button
+            className="btn"
+            onClick={onOpenReview}
+            title={`Review Obsidian Note & Timestamps (${timestampsCount} timestamps)`}
+            style={{
+              padding: '4px 8px',
+              fontSize: '11px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              borderColor: timestampsCount > 0 ? 'rgba(99, 102, 241, 0.4)' : 'var(--border-color)',
+            }}
+          >
+            <BookOpen size={12} color="var(--accent-primary)" />
+            <span>Review{timestampsCount > 0 ? ` (${timestampsCount})` : ''}</span>
+          </button>
+        )}
+
         <button
           className="btn btn-icon"
           onClick={onTogglePreview}
@@ -92,13 +117,25 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </button>
 
         <button
-          className="btn btn-emerald"
+          className={`btn ${hasUnsavedChanges ? 'btn-emerald' : ''}`}
           onClick={onSaveToVault}
           disabled={isSaving}
-          title="Save Markdown & Images to Obsidian Vault"
+          title={
+            isSaving
+              ? 'Saving to Obsidian Vault...'
+              : hasUnsavedChanges
+              ? 'Save Unsaved Changes to Obsidian Vault'
+              : 'All Changes Saved to Obsidian Vault'
+          }
         >
-          <FolderDown size={14} />
-          <span>{isSaving ? 'Saving...' : 'Save'}</span>
+          {isSaving ? (
+            <RefreshCw size={14} className="spin" />
+          ) : hasUnsavedChanges ? (
+            <FolderDown size={14} />
+          ) : (
+            <Check size={14} color="#34d399" />
+          )}
+          <span>{isSaving ? 'Saving...' : hasUnsavedChanges ? 'Save' : 'Saved'}</span>
         </button>
 
         <button

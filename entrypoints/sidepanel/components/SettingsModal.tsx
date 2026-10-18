@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Key, Folder, ExternalLink, Keyboard, Check, BookOpen, Cpu } from 'lucide-react';
+import { X, Key, Folder, ExternalLink, Keyboard, Check, BookOpen, Cpu, Radio } from 'lucide-react';
 import type { TemplateType } from '../../../utils/templates';
 
 interface SettingsModalProps {
@@ -12,6 +12,8 @@ interface SettingsModalProps {
   selectedTemplate: TemplateType;
   onSelectTemplate: (template: TemplateType) => void;
   onApplyTemplate: () => void;
+  autoSaveEnabled: boolean;
+  onToggleAutoSave: (enabled: boolean) => void;
   onClose: () => void;
 }
 
@@ -25,6 +27,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   selectedTemplate,
   onSelectTemplate,
   onApplyTemplate,
+  autoSaveEnabled,
+  onToggleAutoSave,
   onClose,
 }) => {
   const [localKey, setLocalKey] = useState(apiKey);
@@ -167,9 +171,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {vaultName ? 'Change Vault' : 'Select Vault'}
             </button>
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
+            <input
+              type="checkbox"
+              id="autoSaveToggle"
+              checked={autoSaveEnabled}
+              onChange={(e) => onToggleAutoSave(e.target.checked)}
+              style={{ cursor: 'pointer', accentColor: 'var(--accent-primary)' }}
+            />
+            <label htmlFor="autoSaveToggle" style={{ fontSize: '11.5px', color: 'var(--text-primary)', cursor: 'pointer', userSelect: 'none' }}>
+              Auto-save to vault every 30s & on pause
+            </label>
+          </div>
           <p style={{ fontSize: '11px', color: 'var(--text-subtle)', marginTop: '4px' }}>
             Uses the HTML5 File System Access API to write .md notes and images directly to disk.
           </p>
+        </div>
+
+        {/* Chrome Live Caption Bridge */}
+        <div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 500, marginBottom: '6px', color: 'var(--text-muted)' }}>
+            <Radio size={13} color="var(--accent-primary)" />
+            <span>Chrome Live Caption Bridge</span>
+          </label>
+          <div style={{ padding: '8px 10px', background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', fontSize: '11px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <div style={{ color: 'var(--text-muted)', lineHeight: 1.4 }}>
+              Enable <b>Live Caption</b> in Chrome (<code>chrome://settings/accessibility</code>) and start the local bridge:
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <code style={{ flex: 1, padding: '4px 6px', background: '#090d16', borderRadius: '4px', fontSize: '10.5px', color: '#34d399', fontFamily: 'monospace' }}>
+                npm run caption-bridge
+              </code>
+              <button
+                className="btn"
+                onClick={() => navigator.clipboard.writeText('npm run caption-bridge')}
+                style={{ padding: '3px 8px', fontSize: '10px' }}
+              >
+                Copy
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Keyboard Shortcuts */}
