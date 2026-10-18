@@ -119,6 +119,8 @@ video_notes_00/
 │   ├── content.ts                  # Multi-frame video detector, DOM observer & timestamp sync
 │   └── sidepanel/                  # React note-taking workspace
 │       ├── App.tsx                 # Main layout, live playback banner & vault sync
+│       ├── index.html              # Side panel HTML container
+│       ├── main.tsx                # React mount entrypoint
 │       ├── components/
 │       │   ├── Editor.tsx          # Markdown editor with live preview
 │       │   ├── FrameGallery.tsx    # Slide snapshots & OCR explainer
@@ -138,7 +140,8 @@ video_notes_00/
 │   └── vaultStorage.ts             # Local-first Obsidian vault file writer
 ├── tests/
 │   ├── noteMerge.test.ts           # Tests for non-destructive merge & timestamp parsing
-│   └── utils.test.ts               # Vitest unit test suite (formatting, parsing, deduplication)
+│   ├── utils.test.ts               # Vitest unit test suite (formatting, parsing, deduplication)
+│   └── vaultStorage.test.ts        # Obsidian vault writer, Wikilink & attachment tests
 ├── wxt.config.ts                   # WXT Manifest V3 extension configuration
 ├── package.json                    # Project dependencies & scripts
 ├── GEMINI.md                       # Agent operating guide
