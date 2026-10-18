@@ -98,10 +98,10 @@
 
 7. **Live Caption Transcription (Optional, for Any Video/Canvas Lecture)**:
    - In Chrome, open `chrome://settings/accessibility` and toggle **Live Caption** to **ON**.
-   - In your project terminal, start the companion bridge:
-     ```bash
-     npm run caption-bridge
-     ```
+   - Start the companion bridge (choose one):
+     - **Interactive Terminal**: `npm run caption-bridge`
+     - **Silent Background (Zero Terminals)**: `npm run caption-bridge:bg` (runs completely hidden via Windows Script Host)
+     - **Stop Bridge**: `npm run caption-bridge:stop`
    - Open the **Captions** tab in the Video Notes Side Panel. Live speech will stream directly with interactive timestamps!
 
 ---
@@ -113,12 +113,14 @@ video_notes_00/
 ├── .agents/                        # Agent rules, workflows, and task configs
 ├── companion/                      # Live Caption Desktop Bridge
 │   ├── caption_bridge.py           # Windows UIA live caption WebSocket bridge (ws://localhost:8765)
-│   └── run_bridge.bat              # Launcher batch script
+│   ├── run_bridge.bat              # Launcher batch script
+│   ├── run_bridge_background.vbs   # Silent headless runner (zero terminal windows)
+│   └── stop_bridge.bat             # Terminate background bridge processes
 ├── entrypoints/
-│   ├── background.ts               # Side panel behavior & visibleTab screenshot fallback
+│   ├── background.ts               # Side panel behavior, tab switching & audible attribution router
 │   ├── content.ts                  # Multi-frame video detector, DOM observer & timestamp sync
 │   └── sidepanel/                  # React note-taking workspace
-│       ├── App.tsx                 # Main layout, live playback banner & vault sync
+│       ├── App.tsx                 # Main layout, multi-session switcher & vault sync
 │       ├── index.html              # Side panel HTML container
 │       ├── main.tsx                # React mount entrypoint
 │       ├── components/
@@ -127,6 +129,7 @@ video_notes_00/
 │       │   ├── LiveCaptionsTab.tsx # Live Chrome & Canvas caption stream
 │       │   ├── AIAssistant.tsx     # Gemini multimodal chat & summaries
 │       │   ├── ReviewNoteModal.tsx # Obsidian review modal with timeline & resume action
+│       │   ├── SessionSwitcherModal.tsx # Multi-tab video session manager & note switcher
 │       │   ├── Toolbar.tsx         # Quick action controls
 │       │   └── SettingsModal.tsx   # Vault, API keys & templates config
 │       └── styles/
@@ -135,12 +138,16 @@ video_notes_00/
 │   ├── geminiClient.ts             # Gemini 3.8/2.0 multimodal vision & transcript API
 │   ├── messaging.ts                # Type-safe extension message protocol
 │   ├── noteMerge.ts                # Non-destructive vault merging & strict timestamp parsing
+│   ├── sessionManager.ts           # URL-dependent session registry, canonical URL parser & state storage
 │   ├── templates.ts                # Cornell, lecture & flashcard templates
 │   ├── transcriptExtractor.ts      # Canvas, Video.js & YouTube caption extractor & delta parser
+│   ├── vaultQueue.ts               # Thread-safe write queue for concurrent multi-tab Obsidian saves
 │   └── vaultStorage.ts             # Local-first Obsidian vault file writer
 ├── tests/
 │   ├── noteMerge.test.ts           # Tests for non-destructive merge & timestamp parsing
+│   ├── sessionManager.test.ts      # URL canonicalization, file sanitization & session CRUD tests
 │   ├── utils.test.ts               # Vitest unit test suite (formatting, parsing, deduplication)
+│   ├── vaultQueue.test.ts          # Thread-safe write queue & concurrent save serialization tests
 │   └── vaultStorage.test.ts        # Obsidian vault writer, Wikilink & attachment tests
 ├── wxt.config.ts                   # WXT Manifest V3 extension configuration
 ├── package.json                    # Project dependencies & scripts
@@ -158,6 +165,10 @@ video_notes_00/
 - [x] Gemini 3.8 / 2.0 Flash multimodal frame analysis, OCR & transcript summarization
 - [x] Rich Markdown editor with live preview & inline clickable timestamp seeking
 - [x] Global keyboard shortcuts (`Alt+S`, `Alt+T`, `Alt+P`)
+- [x] Non-destructive Obsidian file merging & external edit preservation
+- [x] URL-dependent multi-session management (distinct notes per video tab without mixing)
+- [x] Thread-safe concurrent Obsidian vault write queue (`vaultQueue`)
+- [x] Headless zero-terminal caption bridge runner (`caption-bridge:bg`)
 - [x] Real-time Chrome Live Caption streaming bridge with delta-deduplication
 - [x] Canvas LMS, Canvas Studio & Video.js iframe integration & subtitle scraping
 - [x] Non-destructive vault file merge (preserves external edits, prevents overwriting)

@@ -22,6 +22,10 @@ interface LiveCaptionsTabProps {
   onInsertIntoNotes: (text: string) => void;
   onSeek: (timestamp: number) => void;
   pageUrl: string;
+  sessionKey?: string;
+  audibleSessionKey?: string | null;
+  captionItems?: LiveCaptionItem[];
+  onUpdateCaptionItems?: (items: LiveCaptionItem[]) => void;
   onSummarizeWithAI: (transcript: string) => void;
   onOpenSettings: () => void;
 }
@@ -30,6 +34,10 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
   onInsertIntoNotes,
   onSeek,
   pageUrl,
+  sessionKey,
+  audibleSessionKey,
+  captionItems: externalCaptionItems,
+  onUpdateCaptionItems,
   onSummarizeWithAI,
   onOpenSettings,
 }) => {
@@ -40,7 +48,20 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
   const [isRecording, setIsRecording] = useState(true);
   const [autoAppend, setAutoAppend] = useState(false);
   const [activeLiveText, setActiveLiveText] = useState('');
-  const [captionItems, setCaptionItems] = useState<LiveCaptionItem[]>([]);
+  const [internalCaptionItems, setInternalCaptionItems] = useState<LiveCaptionItem[]>([]);
+  const captionItems = externalCaptionItems !== undefined ? externalCaptionItems : internalCaptionItems;
+
+  const setCaptionItems = (updater: LiveCaptionItem[] | ((prev: LiveCaptionItem[]) => LiveCaptionItem[])) => {
+    if (typeof updater === 'function') {
+      const next = updater(captionItems);
+      if (onUpdateCaptionItems) onUpdateCaptionItems(next);
+      setInternalCaptionItems(next);
+    } else {
+      if (onUpdateCaptionItems) onUpdateCaptionItems(updater);
+      setInternalCaptionItems(updater);
+    }
+  };
+
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedSuccess, setCopiedSuccess] = useState(false);
   const [showSetupModal, setShowSetupModal] = useState(false);
@@ -50,6 +71,14 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const lastCommittedTextRef = useRef<string>('');
   const accumulatedTextRef = useRef<string>('');
+
+  // Reset rolling text buffer when sessionKey changes to prevent cross-tab text overlap
+  useEffect(() => {
+    setActiveLiveText('');
+    lastCommittedTextRef.current = '';
+    accumulatedTextRef.current = captionItems.map((c) => c.text).join(' ');
+  }, [sessionKey]);
+
   const lastKnownVideoTimeRef = useRef<{ timestamp: number; formattedTime: string }>({
     timestamp: 0,
     formattedTime: '00:00',
@@ -110,6 +139,11 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
             } else if (data.type === 'SOURCE_DETACHED') {
               setBridgeSource(null);
             } else if (data.type === 'CAPTION_UPDATE') {
+              // If an audible session is explicitly tracked and is not this tab, ignore
+              if (audibleSessionKey && sessionKey && audibleSessionKey !== sessionKey) {
+                return;
+              }
+
               const text = (data.text || '').trim();
               if (!text) return;
 
@@ -204,6 +238,11 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
     const webCaptionListener = (msg: ExtensionMessage) => {
       if (!isMounted || !isRecording) return;
       if (msg.type === 'LIVE_WEB_CAPTION' && msg.text) {
+        // If caption is tagged with a sessionKey that belongs to another tab, ignore in this panel
+        if (msg.sessionKey && sessionKey && msg.sessionKey !== sessionKey) {
+          return;
+        }
+
         // If bridge is not connected, set status to web-only
         if (connectionStatus === 'disconnected' || connectionStatus === 'connecting') {
           setConnectionStatus('web-only');

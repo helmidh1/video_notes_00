@@ -4,6 +4,7 @@ import type {
   FrameCaptureResponse,
   TranscriptResponse,
   VideoStateResponse,
+  LiveCaptionItem,
 } from '../../utils/messaging';
 import {
   getSavedVaultDirectory,
@@ -36,6 +37,17 @@ import {
   analyzeVideoFrameWithGemini,
 } from '../../utils/geminiClient';
 import { generateTemplate, type TemplateType } from '../../utils/templates';
+import {
+  normalizeSessionUrl,
+  createDefaultSession,
+  loadSession,
+  saveSession,
+  getAllSessions,
+  deleteSession,
+  type VideoSession,
+  sanitizeFileName,
+} from '../../utils/sessionManager';
+import { vaultQueue } from '../../utils/vaultQueue';
 import { Toolbar } from './components/Toolbar';
 import { Editor } from './components/Editor';
 import { FrameGallery, type CapturedFrame } from './components/FrameGallery';
@@ -43,6 +55,7 @@ import { AIAssistant } from './components/AIAssistant';
 import { SettingsModal } from './components/SettingsModal';
 import { LiveCaptionsTab } from './components/LiveCaptionsTab';
 import { ReviewNoteModal } from './components/ReviewNoteModal';
+import { SessionSwitcherModal } from './components/SessionSwitcherModal';
 import {
   FileText,
   Image,
@@ -56,6 +69,7 @@ import {
   Clock,
   BookOpen,
   Play,
+  Layers,
 } from 'lucide-react';
 import './styles/theme.css';
 
@@ -84,6 +98,13 @@ export default function App() {
   const [existingVaultMarkdown, setExistingVaultMarkdown] = useState('');
   const [existingVaultFileName, setExistingVaultFileName] = useState<string | null>(null);
 
+  // Multi-session management state
+  const [currentSessionKey, setCurrentSessionKey] = useState<string>('');
+  const [allSessions, setAllSessions] = useState<VideoSession[]>([]);
+  const [isSessionPickerOpen, setIsSessionPickerOpen] = useState(false);
+  const [audibleSessionKey, setAudibleSessionKey] = useState<string | null>(null);
+  const [captionItems, setCaptionItems] = useState<LiveCaptionItem[]>([]);
+
   // Live video state and persisted playback progress
   const [liveVideoTime, setLiveVideoTime] = useState<{
     currentTime: number;
@@ -108,6 +129,23 @@ export default function App() {
   framesRef.current = frames;
   const pageUrlRef = useRef(pageUrl);
   pageUrlRef.current = pageUrl;
+
+  const currentSessionKeyRef = useRef(currentSessionKey);
+  currentSessionKeyRef.current = currentSessionKey;
+  const captionItemsRef = useRef(captionItems);
+  captionItemsRef.current = captionItems;
+  const audibleSessionKeyRef = useRef(audibleSessionKey);
+  audibleSessionKeyRef.current = audibleSessionKey;
+  const liveVideoTimeRef = useRef(liveVideoTime);
+  liveVideoTimeRef.current = liveVideoTime;
+  const hasUnsavedChangesRef = useRef(hasUnsavedChanges);
+  hasUnsavedChangesRef.current = hasUnsavedChanges;
+  const autoSaveEnabledRef = useRef(autoSaveEnabled);
+  autoSaveEnabledRef.current = autoSaveEnabled;
+  const existingVaultMarkdownRef = useRef(existingVaultMarkdown);
+  existingVaultMarkdownRef.current = existingVaultMarkdown;
+  const existingVaultFileNameRef = useRef(existingVaultFileName);
+  existingVaultFileNameRef.current = existingVaultFileName;
 
   const lastSavedMarkdownRef = useRef<string>('');
   const lastSavedTitleRef = useRef<string>('');
@@ -169,6 +207,155 @@ export default function App() {
     }
     return map;
   }, [frames]);
+
+  // Seamlessly switch active video note session
+  async function switchSession(
+    newSessionKey: string,
+    newUrl?: string,
+    newTitle?: string,
+    newTabId?: number
+  ) {
+    if (!newSessionKey) return;
+    const oldKey = currentSessionKeyRef.current;
+
+    // 1. Auto-flush outgoing session state before switching
+    if (oldKey && oldKey !== newSessionKey) {
+      try {
+        const outgoingSession: VideoSession = {
+          sessionKey: oldKey,
+          canonicalUrl: normalizeSessionUrl(pageUrlRef.current).canonicalUrl,
+          rawUrl: pageUrlRef.current,
+          title: noteTitleRef.current,
+          targetFileName: `${sanitizeFileName(noteTitleRef.current)}.md`,
+          markdown: markdownRef.current,
+          frames: framesRef.current,
+          captionItems: captionItemsRef.current,
+          playheadTime: liveVideoTimeRef.current?.currentTime || 0,
+          formattedTime: liveVideoTimeRef.current?.formattedTime || '00:00',
+          isAudible: false,
+          isPlaying: false,
+          autoAppend: autoSaveEnabledRef.current,
+          lastSavedMarkdown: lastSavedMarkdownRef.current,
+          lastSavedTime: Date.now(),
+          existingVaultMarkdown: existingVaultMarkdownRef.current,
+          existingVaultFileName: existingVaultFileNameRef.current || undefined,
+        };
+        await saveSession(outgoingSession);
+        if (hasUnsavedChangesRef.current) {
+          await performSaveToVault(true);
+        }
+      } catch (err) {
+        console.warn('Error flushing outgoing session:', err);
+      }
+    }
+
+    // 2. Set current session pointer
+    setCurrentSessionKey(newSessionKey);
+    currentSessionKeyRef.current = newSessionKey;
+
+    // 3. Load or create target session
+    let targetSession = await loadSession(newSessionKey);
+    if (!targetSession) {
+      targetSession = createDefaultSession(newUrl || '', newTitle, newTabId);
+      await saveSession(targetSession);
+    }
+
+    // 4. Update UI states from target session
+    const resolvedTitle = targetSession.title || 'Video Notes';
+    setNoteTitle(resolvedTitle);
+    noteTitleRef.current = resolvedTitle;
+    lastSavedTitleRef.current = resolvedTitle;
+
+    const targetUrl = targetSession.rawUrl || targetSession.canonicalUrl || '';
+    setPageUrl(targetUrl);
+    pageUrlRef.current = targetUrl;
+
+    setMarkdown(targetSession.markdown || '');
+    markdownRef.current = targetSession.markdown || '';
+    lastSavedMarkdownRef.current = targetSession.lastSavedMarkdown || targetSession.markdown || '';
+
+    setFrames(targetSession.frames || []);
+    framesRef.current = targetSession.frames || [];
+    savedFrameIdsRef.current = new Set((targetSession.frames || []).map((f) => f.id));
+
+    setCaptionItems(targetSession.captionItems || []);
+    captionItemsRef.current = targetSession.captionItems || [];
+
+    setExistingVaultMarkdown(targetSession.existingVaultMarkdown || '');
+    existingVaultMarkdownRef.current = targetSession.existingVaultMarkdown || '';
+    setExistingVaultFileName(targetSession.existingVaultFileName || null);
+    existingVaultFileNameRef.current = targetSession.existingVaultFileName || null;
+
+    setHasUnsavedChanges(false);
+
+    // 5. Query Obsidian vault for latest content
+    await checkAndLoadExistingNote(resolvedTitle, targetUrl);
+
+    // 6. Refresh sessions list
+    const sessions = await getAllSessions();
+    setAllSessions(sessions);
+  }
+
+  // Handle incoming live captions for a background (non-active) tab session
+  async function handleBackgroundCaption(
+    sessionKey: string,
+    msg: {
+      text: string;
+      timestamp: number;
+      formattedTime: string;
+      pageUrl?: string;
+    }
+  ) {
+    try {
+      let session = await loadSession(sessionKey);
+      if (!session && msg.pageUrl) {
+        session = createDefaultSession(msg.pageUrl, 'Video Notes');
+      }
+      if (!session) return;
+
+      const newItem: LiveCaptionItem = {
+        id: crypto.randomUUID(),
+        text: msg.text,
+        timestamp: msg.timestamp,
+        formattedTime: msg.formattedTime,
+        isFinal: true,
+        source: 'web-caption',
+      };
+      session.captionItems = [...(session.captionItems || []), newItem];
+
+      if (session.autoAppend) {
+        const line = `\n- [${msg.formattedTime}](${session.rawUrl || msg.pageUrl}#t=${Math.floor(
+          msg.timestamp
+        )}s) ${msg.text}`;
+        session.markdown = session.markdown ? session.markdown + line : line.trimStart();
+        session.lastSavedTime = Date.now();
+
+        // Enqueue non-destructive save to Obsidian vault via thread-safe write queue
+        const dirHandle = await getSavedVaultDirectory().catch(() => null);
+        if (dirHandle) {
+          const fullContent = session.markdown.startsWith('---')
+            ? session.markdown
+            : generateObsidianFrontmatter({
+                title: session.title,
+                sourceUrl: session.rawUrl || msg.pageUrl,
+                tags: ['video-notes', 'study'],
+              }) + session.markdown;
+
+          const targetFileName = session.existingVaultFileName
+            ? session.existingVaultFileName.replace(/\.md$/, '')
+            : session.title;
+
+          await vaultQueue.enqueueMarkdownSave(dirHandle, targetFileName, fullContent);
+        }
+      }
+
+      await saveSession(session);
+      const sessions = await getAllSessions();
+      setAllSessions(sessions);
+    } catch (err) {
+      console.warn('Error handling background caption:', err);
+    }
+  }
 
   // Check and load existing note from Obsidian vault (primary) or local storage cache (fallback)
   async function checkAndLoadExistingNote(
@@ -384,23 +571,23 @@ export default function App() {
       });
     }
 
+    // Initial session index load
+    getAllSessions().then(setAllSessions).catch(() => {});
+
     // Check active tab info if in extension environment
     if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
       chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-        let tTitle = noteTitle;
-        let tUrl = pageUrl;
-        if (tab?.title) {
-          tTitle = tab.title.replace(/ - YouTube$/, '');
-          setNoteTitle(tTitle);
-          noteTitleRef.current = tTitle;
-          lastSavedTitleRef.current = tTitle;
+        if (tab?.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+          const { sessionKey } = normalizeSessionUrl(tab.url);
+          switchSession(sessionKey, tab.url, tab.title, tab.id);
+        } else {
+          // If active tab is not a video page, load last active session if available
+          getAllSessions().then((sessions) => {
+            if (sessions.length > 0 && !currentSessionKeyRef.current) {
+              switchSession(sessions[0].sessionKey);
+            }
+          }).catch(() => {});
         }
-        if (tab?.url) {
-          tUrl = tab.url;
-          setPageUrl(tUrl);
-          pageUrlRef.current = tUrl;
-        }
-        checkAndLoadExistingNote(tTitle, tUrl);
 
         if (tab?.id) {
           chrome.tabs.sendMessage<ExtensionMessage, VideoStateResponse>(tab.id, {
@@ -419,7 +606,7 @@ export default function App() {
       }).catch(() => {});
     }
 
-    // Listen for background hotkey broadcasts and real-time video playback updates
+    // Listen for background hotkeys, tab switches, and playback/caption updates
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       const messageListener = (msg: ExtensionMessage) => {
         if (msg.type === 'HOTKEY_COMMAND') {
@@ -427,19 +614,43 @@ export default function App() {
           if (msg.command === 'insert_timestamp') handleInsertTimestamp();
           if (msg.command === 'toggle_play') handleTogglePlay();
         }
+
+        if (msg.type === 'ACTIVE_TAB_CHANGED') {
+          if (msg.sessionKey && msg.sessionKey !== currentSessionKeyRef.current) {
+            switchSession(msg.sessionKey, msg.url, msg.title, msg.tabId);
+          }
+        }
+
+        if (msg.type === 'AUDIBLE_TAB_CHANGED') {
+          if (msg.audible) {
+            setAudibleSessionKey(msg.sessionKey || null);
+          } else if (audibleSessionKeyRef.current === msg.sessionKey) {
+            setAudibleSessionKey(null);
+          }
+        }
+
+        if (msg.type === 'LIVE_WEB_CAPTION') {
+          if (msg.sessionKey && msg.sessionKey !== currentSessionKeyRef.current) {
+            handleBackgroundCaption(msg.sessionKey, msg);
+          }
+        }
+
         if (msg.type === 'VIDEO_TIME_UPDATE') {
-          setLiveVideoTime({
-            currentTime: msg.currentTime,
-            formattedTime: msg.formattedTime,
-            duration: msg.duration,
-            paused: msg.paused,
-          });
-          setSavedVideoPosition({
-            currentTime: msg.currentTime,
-            formattedTime: msg.formattedTime,
-            duration: msg.duration,
-            updatedAt: Date.now(),
-          });
+          // Only update playhead if this update belongs to current session or is untagged
+          if (!msg.sessionKey || msg.sessionKey === currentSessionKeyRef.current) {
+            setLiveVideoTime({
+              currentTime: msg.currentTime,
+              formattedTime: msg.formattedTime,
+              duration: msg.duration,
+              paused: msg.paused,
+            });
+            setSavedVideoPosition({
+              currentTime: msg.currentTime,
+              formattedTime: msg.formattedTime,
+              duration: msg.duration,
+              updatedAt: Date.now(),
+            });
+          }
         }
       };
       chrome.runtime.onMessage.addListener(messageListener);
@@ -816,10 +1027,10 @@ export default function App() {
     }
 
     try {
-      // 1. Only write new frames that haven't been saved to disk yet
+      // 1. Only write new frames that haven't been saved to disk yet via thread-safe write queue
       for (const frame of currentFrames) {
         if (!savedFrameIdsRef.current.has(frame.id)) {
-          await saveBinaryAttachment(dirHandle, frame.fileName, frame.dataUrl);
+          await vaultQueue.enqueueAttachmentSave(dirHandle, frame.fileName, frame.dataUrl);
           savedFrameIdsRef.current.add(frame.id);
         }
       }
@@ -838,8 +1049,8 @@ export default function App() {
         ? existingVaultFileName.replace(/\.md$/, '')
         : currentTitle;
 
-      // 3. Write markdown file to Obsidian vault with optimistic concurrency control
-      const saveResult = await saveMarkdownFileNonDestructive(
+      // 3. Write markdown file to Obsidian vault via thread-safe queue with optimistic concurrency control
+      const saveResult = await vaultQueue.enqueueMarkdownSave(
         dirHandle,
         targetFileName,
         fullContent,
@@ -867,7 +1078,32 @@ export default function App() {
       setVaultPermissionNeeded(false);
       setHasUnsavedChanges(false);
 
-      // Persist active session snapshot to chrome.storage.local for instant reload on extension refresh
+      // Persist active session to multi-session registry and chrome.storage.local
+      const currKey = currentSessionKeyRef.current;
+      if (currKey) {
+        const sessionPayload: VideoSession = {
+          sessionKey: currKey,
+          canonicalUrl: normalizeSessionUrl(currentPageUrl).canonicalUrl,
+          rawUrl: currentPageUrl,
+          title: currentTitle,
+          targetFileName: `${targetFileName}.md`,
+          markdown: saveResult.finalContent,
+          frames: currentFrames,
+          captionItems: captionItemsRef.current || [],
+          playheadTime: liveVideoTimeRef.current?.currentTime || 0,
+          formattedTime: liveVideoTimeRef.current?.formattedTime || '00:00',
+          isAudible: false,
+          isPlaying: isPlaying,
+          autoAppend: autoSaveEnabled,
+          lastSavedMarkdown: saveResult.finalContent,
+          lastSavedTime: saveResult.lastModified || Date.now(),
+          existingVaultMarkdown: saveResult.finalContent,
+          existingVaultFileName: `${targetFileName}.md`,
+        };
+        await saveSession(sessionPayload);
+      }
+
+      // Legacy key fallback for backward compatibility
       if (typeof chrome !== 'undefined' && chrome.storage?.local) {
         const cleanKey = 'session_' + (currentPageUrl.split('#')[0] || currentTitle);
         chrome.storage.local.set({
@@ -877,7 +1113,7 @@ export default function App() {
             url: currentPageUrl,
             updatedAt: saveResult.lastModified || Date.now(),
           },
-        });
+        }).catch(() => {});
       }
 
       if (!silent) {
@@ -978,21 +1214,49 @@ export default function App() {
           borderBottom: '1px solid var(--border-color)',
         }}
       >
-        <input
-          type="text"
-          className="input-field"
-          value={noteTitle}
-          onChange={(e) => setNoteTitle(e.target.value)}
-          placeholder="Note Title"
-          style={{
-            fontWeight: 600,
-            fontSize: '13px',
-            border: 'none',
-            background: 'transparent',
-            padding: '4px 6px',
-            color: '#fff',
-          }}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1, minWidth: 0, marginRight: '8px' }}>
+          <input
+            type="text"
+            className="input-field"
+            value={noteTitle}
+            onChange={(e) => setNoteTitle(e.target.value)}
+            placeholder="Note Title"
+            style={{
+              fontWeight: 600,
+              fontSize: '13px',
+              border: 'none',
+              background: 'transparent',
+              padding: '4px 6px',
+              color: '#fff',
+              flex: 1,
+              minWidth: '60px',
+            }}
+          />
+
+          <button
+            className="btn"
+            onClick={() => {
+              getAllSessions().then(setAllSessions);
+              setIsSessionPickerOpen(true);
+            }}
+            style={{
+              padding: '2px 8px',
+              fontSize: '10.5px',
+              background: 'rgba(99, 102, 241, 0.12)',
+              borderColor: 'rgba(99, 102, 241, 0.3)',
+              color: '#c7d2fe',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              flexShrink: 0,
+              height: '24px',
+            }}
+            title="Manage and switch between open video note sessions"
+          >
+            <Layers size={11} color="var(--accent-primary)" />
+            <span>Sessions ({allSessions.length})</span>
+          </button>
+        </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           {vaultPermissionNeeded && (
@@ -1238,6 +1502,10 @@ export default function App() {
             }}
             onSeek={handleSeek}
             pageUrl={pageUrl}
+            sessionKey={currentSessionKey}
+            audibleSessionKey={audibleSessionKey}
+            captionItems={captionItems}
+            onUpdateCaptionItems={setCaptionItems}
             onSummarizeWithAI={async (transcript) => {
               if (!apiKey.trim()) {
                 showStatus('Enter your Gemini API key in Settings first.', 'error');
@@ -1359,6 +1627,22 @@ export default function App() {
           onMergeWithVault={() => performSaveToVault(false)}
           onInsertSnippet={(text) => setMarkdown((prev) => prev + text)}
           onClose={() => setIsReviewOpen(false)}
+        />
+      )}
+
+      {/* Multi-Session Manager Modal */}
+      {isSessionPickerOpen && (
+        <SessionSwitcherModal
+          sessions={allSessions}
+          currentSessionKey={currentSessionKey}
+          audibleSessionKey={audibleSessionKey}
+          onSelectSession={(key) => switchSession(key)}
+          onDeleteSession={async (key) => {
+            await deleteSession(key);
+            const sessions = await getAllSessions();
+            setAllSessions(sessions);
+          }}
+          onClose={() => setIsSessionPickerOpen(false)}
         />
       )}
     </div>

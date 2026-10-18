@@ -10,6 +10,8 @@
     "zip": "wxt zip",
     "test": "vitest run",
     "caption-bridge": "python companion/caption_bridge.py",
+    "caption-bridge:bg": "wscript //nologo companion/run_bridge_background.vbs",
+    "caption-bridge:stop": "companion\\stop_bridge.bat",
     "postinstall": "wxt prepare"
   },
   "dependencies": {

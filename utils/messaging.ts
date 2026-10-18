@@ -7,7 +7,16 @@ export type ExtensionMessage =
   | { type: 'EXTRACT_TRANSCRIPT' }
   | { type: 'START_LIVE_CAPTIONS' }
   | { type: 'STOP_LIVE_CAPTIONS' }
-  | { type: 'LIVE_WEB_CAPTION'; text: string; timestamp: number; formattedTime: string }
+  | {
+      type: 'LIVE_WEB_CAPTION';
+      text: string;
+      timestamp: number;
+      formattedTime: string;
+      pageUrl?: string;
+      canonicalUrl?: string;
+      sessionKey?: string;
+      tabId?: number;
+    }
   | {
       type: 'VIDEO_TIME_UPDATE';
       currentTime: number;
@@ -15,8 +24,14 @@ export type ExtensionMessage =
       duration: number;
       paused?: boolean;
       pageUrl?: string;
+      canonicalUrl?: string;
+      sessionKey?: string;
+      pageTitle?: string;
+      tabId?: number;
     }
-  | { type: 'HOTKEY_COMMAND'; command: string };
+  | { type: 'HOTKEY_COMMAND'; command: string }
+  | { type: 'ACTIVE_TAB_CHANGED'; tabId: number; url: string; title: string; sessionKey: string }
+  | { type: 'AUDIBLE_TAB_CHANGED'; tabId: number; audible: boolean; sessionKey?: string };
 
 export interface LiveCaptionItem {
   id: string;

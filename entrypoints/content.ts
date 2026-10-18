@@ -1,5 +1,6 @@
 import type { ExtensionMessage, FrameCaptureResponse, VideoStateResponse } from '../utils/messaging';
 import { extractVideoTranscript, formatSeconds } from '../utils/transcriptExtractor';
+import { normalizeSessionUrl } from '../utils/sessionManager';
 
 function findAllVideos(root: Document | ShadowRoot = document): HTMLVideoElement[] {
   const videos: HTMLVideoElement[] = [];
@@ -266,6 +267,7 @@ function saveAndBroadcastVideoProgress(video: HTMLVideoElement, force = false) {
   lastBroadcastTime = current;
 
   const formattedTime = formatSeconds(video.currentTime);
+  const { canonicalUrl, sessionKey } = normalizeSessionUrl(window.location.href);
   const cleanUrl = window.location.href.split('#')[0].replace(/[?&]t=\d+s?/, '');
   const storageKey = 'video_pos_' + cleanUrl;
 
@@ -277,6 +279,8 @@ function saveAndBroadcastVideoProgress(video: HTMLVideoElement, force = false) {
     updatedAt: Date.now(),
     pageTitle: document.title,
     pageUrl: window.location.href,
+    canonicalUrl,
+    sessionKey,
   };
 
   // 1. Store in chrome.storage.local for persistence across reloads / coming back later
@@ -358,11 +362,15 @@ function startLiveCaptionObserver() {
         lastObservedCaption = fullText;
         const video = getActiveVideo();
         const time = video ? video.currentTime : 0;
+        const { canonicalUrl, sessionKey } = normalizeSessionUrl(window.location.href);
         chrome.runtime.sendMessage({
           type: 'LIVE_WEB_CAPTION',
           text: fullText,
           timestamp: time,
           formattedTime: formatSeconds(time),
+          pageUrl: window.location.href,
+          canonicalUrl,
+          sessionKey,
         }).catch(() => {});
       }
     }
@@ -382,11 +390,15 @@ function startLiveCaptionObserver() {
         if (text && text !== lastObservedCaption) {
           lastObservedCaption = text;
           const time = cue.startTime || (video ? video.currentTime : 0);
+          const { canonicalUrl, sessionKey } = normalizeSessionUrl(window.location.href);
           chrome.runtime.sendMessage({
             type: 'LIVE_WEB_CAPTION',
             text,
             timestamp: time,
             formattedTime: formatSeconds(time),
+            pageUrl: window.location.href,
+            canonicalUrl,
+            sessionKey,
           }).catch(() => {});
         }
       }

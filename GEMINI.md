@@ -78,12 +78,14 @@ video_notes_00/
 │       └── gemini-multimodal-assistant/
 ├── companion/                      # Live Caption Desktop Bridge
 │   ├── caption_bridge.py           # Windows UIA live caption WebSocket server (ws://localhost:8765)
-│   └── run_bridge.bat              # Quick start batch launcher
+│   ├── run_bridge.bat              # Quick start batch launcher
+│   ├── run_bridge_background.vbs   # Silent headless runner (zero terminal windows)
+│   └── stop_bridge.bat             # Terminate background bridge processes
 ├── entrypoints/
-│   ├── background.ts               # Side Panel behavior, CORS screenshot fallback handler
+│   ├── background.ts               # Side Panel behavior, tab switching & audible attribution router
 │   ├── content.ts                  # Multi-video player detector, DOM observer, timestamp sync & WebVTT captions
 │   └── sidepanel/                  # Premium React note-taking workspace
-│       ├── App.tsx                 # Core sidepanel state, live playhead banner & non-destructive vault loader
+│       ├── App.tsx                 # Core sidepanel state, multi-session switcher & vault sync
 │       ├── index.html              # HTML container
 │       ├── main.tsx               # React mount root
 │       ├── components/
@@ -92,6 +94,7 @@ video_notes_00/
 │       │   ├── LiveCaptionsTab.tsx # Live Chrome & Web caption stream with delta deduplication
 │       │   ├── AIAssistant.tsx     # Gemini multimodal chat & transcript summarizer
 │       │   ├── ReviewNoteModal.tsx # Obsidian review modal with chronological timeline & resume action
+│       │   ├── SessionSwitcherModal.tsx # Multi-tab video session manager & note switcher
 │       │   ├── Toolbar.tsx         # Fast access action bar
 │       │   └── SettingsModal.tsx   # Obsidian vault connector & API configuration
 │       └── styles/
@@ -100,12 +103,16 @@ video_notes_00/
 │   ├── geminiClient.ts             # Gemini 2.0/2.5 Flash multimodal vision & transcript API
 │   ├── messaging.ts                # Type-safe extension message definitions
 │   ├── noteMerge.ts                # Non-destructive vault merging, strict timestamp parsing & attachment rehydration
+│   ├── sessionManager.ts           # URL-dependent session registry, canonical URL parser & state storage
 │   ├── templates.ts                # Cornell, lecture & flashcard templates
 │   ├── transcriptExtractor.ts      # Multi-tier caption extractor (textTracks, YouTube DOM, API)
+│   ├── vaultQueue.ts               # Thread-safe write queue for concurrent multi-tab Obsidian saves
 │   └── vaultStorage.ts             # Obsidian vault writer, Wikilink generator, image saver
 ├── tests/
 │   ├── noteMerge.test.ts           # Non-destructive merge, frontmatter isolation & timestamp tests
+│   ├── sessionManager.test.ts      # URL canonicalization, file sanitization & session CRUD tests
 │   ├── utils.test.ts               # Timestamp formatting, seek parsing & caption deduplication tests
+│   ├── vaultQueue.test.ts          # Thread-safe write queue & concurrent save serialization tests
 │   └── vaultStorage.test.ts        # Obsidian vault writer, Wikilink & attachment tests
 ├── package.json                    # Project dependencies and build scripts
 ├── tsconfig.json                   # Strict TypeScript configuration
@@ -146,6 +153,13 @@ video_notes_00/
 - Connects to Windows UI Automation (`uiautomation`) to read Chrome's floating Live Caption window (`Chrome_WidgetWin_1`).
 - Runs a local WebSocket server at `ws://localhost:8765`.
 - Broadcasts real-time transcript chunks directly to `LiveCaptionsTab.tsx` with delta-deduplication, allowing seamless note-taking even when YouTube or third-party web captions are unavailable or closed.
+
+### 5. URL-Dependent Multi-Session Management & Tab-Isolated Vault Sync (`utils/sessionManager.ts`, `utils/vaultQueue.ts`)
+- **Multi-Tab Independence**: Each browser video tab represents a distinct, isolated session keyed to its canonical URL (`sessionKey`).
+- **Zero Collision Guarantee**: Transcripts, timestamps, and frames from Tab A write strictly to Note A, while Tab B writes strictly to Note B. Notes and attachments never mix.
+- **Thread-Safe Vault Queue**: Concurrent asynchronous writes from multiple tabs are serialized via `vaultQueue` with per-file mutex locks to prevent Windows file lock collisions.
+- **Audible Tab Attribution**: Chrome Live Caption speech from the single bridge process is automatically routed to whichever tab is producing audio via `tab.audible`.
+- **Headless Background Execution**: Run silently in the background with zero open terminal windows via `npm run caption-bridge:bg` (`run_bridge_background.vbs`) and `npm run caption-bridge:stop` (`stop_bridge.bat`).
 
 ---
 
