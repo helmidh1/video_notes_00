@@ -16,7 +16,7 @@ import {
   WifiOff,
 } from 'lucide-react';
 import type { ExtensionMessage, LiveCaptionItem, VideoStateResponse } from '../../../utils/messaging';
-import { formatSeconds, extractDeltaText } from '../../../utils/transcriptExtractor';
+import { formatSeconds, extractDeltaText, splitCaptionIntoSentences } from '../../../utils/transcriptExtractor';
 
 interface LiveCaptionsTabProps {
   onInsertIntoNotes: (text: string) => void;
@@ -78,6 +78,48 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
     return lastKnownVideoTimeRef.current;
   }
 
+  const isRecordingRef = useRef(isRecording);
+  isRecordingRef.current = isRecording;
+  const autoAppendRef = useRef(autoAppend);
+  autoAppendRef.current = autoAppend;
+  const pageUrlRef = useRef(pageUrl);
+  pageUrlRef.current = pageUrl;
+  const onInsertIntoNotesRef = useRef(onInsertIntoNotes);
+  onInsertIntoNotesRef.current = onInsertIntoNotes;
+
+  const activeLiveTextRef = useRef<string>('');
+  const pauseTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  async function commitCaptionSentences(rawChunk: string, source: 'chrome-live-caption' | 'web-caption') {
+    const clean = rawChunk.trim();
+    if (!clean || clean.length < 2) return;
+
+    const sentences = splitCaptionIntoSentences(clean);
+    if (sentences.length === 0) return;
+
+    const { timestamp, formattedTime } = await getCurrentVideoTime();
+
+    for (const sentence of sentences) {
+      if (!sentence || sentence.length < 2) continue;
+
+      const newItem: LiveCaptionItem = {
+        id: crypto.randomUUID(),
+        text: sentence,
+        timestamp,
+        formattedTime,
+        isFinal: true,
+        source,
+      };
+
+      setCaptionItems((prev) => [...prev, newItem]);
+
+      if (autoAppendRef.current) {
+        const line = `\n- [${formattedTime}](${pageUrlRef.current}#t=${Math.floor(timestamp)}s) ${sentence}`;
+        onInsertIntoNotesRef.current(line);
+      }
+    }
+  }
+
   // Auto-scroll to bottom of live transcript stream
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -101,7 +143,7 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
         };
 
         ws.onmessage = async (evt) => {
-          if (!isMounted || !isRecording) return;
+          if (!isMounted || !isRecordingRef.current) return;
           try {
             const data = JSON.parse(evt.data);
 
@@ -113,35 +155,35 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
               const text = (data.text || '').trim();
               if (!text) return;
 
-              // Extract only the newly spoken delta (avoid repeating prior rolling sentences)
               const delta = data.delta ? data.delta.trim() : extractDeltaText(accumulatedTextRef.current, text);
               if (delta) {
                 setActiveLiveText(delta);
+                activeLiveTextRef.current = delta;
               }
 
-              // Commit sentence when ended with punctuation or explicitly finalized
-              const isSentenceEnd = data.isFinal || /[.?!]$/.test(text) || (delta && /[.?!]$/.test(delta));
-              if (isSentenceEnd && delta && delta.length > 1 && text !== lastCommittedTextRef.current) {
+              // Finalized sentence from bridge or ends with sentence punctuation
+              const isSentenceEnd = data.isFinal || /[.?!]$/.test(delta) || /[.?!]$/.test(text);
+
+              if (isSentenceEnd && delta && delta.length > 1) {
+                if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
                 accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + delta;
                 lastCommittedTextRef.current = text;
-                const { timestamp, formattedTime } = await getCurrentVideoTime();
-
-                const newItem: LiveCaptionItem = {
-                  id: crypto.randomUUID(),
-                  text: delta,
-                  timestamp,
-                  formattedTime,
-                  isFinal: true,
-                  source: 'chrome-live-caption',
-                };
-
-                setCaptionItems((prev) => [...prev, newItem]);
+                activeLiveTextRef.current = '';
                 setActiveLiveText('');
-
-                if (autoAppend) {
-                  const line = `\n- [${formattedTime}](${pageUrl}#t=${Math.floor(timestamp)}s) ${delta}`;
-                  onInsertIntoNotes(line);
-                }
+                await commitCaptionSentences(delta, 'chrome-live-caption');
+              } else if (delta && delta.length > 1) {
+                // Inactivity pause commit: if user pauses speaking for > 1.6s, commit current clause as its own line
+                if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
+                pauseTimerRef.current = setTimeout(async () => {
+                  if (activeLiveTextRef.current && activeLiveTextRef.current.trim().length > 1) {
+                    const pending = activeLiveTextRef.current.trim();
+                    activeLiveTextRef.current = '';
+                    setActiveLiveText('');
+                    accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + pending;
+                    lastCommittedTextRef.current = text;
+                    await commitCaptionSentences(pending, 'chrome-live-caption');
+                  }
+                }, 1600);
               }
             }
           } catch {
@@ -179,7 +221,7 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
         socketRef.current = null;
       }
     };
-  }, [isRecording, autoAppend, pageUrl]);
+  }, []);
 
   // Start in-browser closed caption fallback observer
   useEffect(() => {
@@ -202,36 +244,36 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
 
     // Listen for captions emitted by content script
     const webCaptionListener = (msg: ExtensionMessage) => {
-      if (!isMounted || !isRecording) return;
+      if (!isMounted || !isRecordingRef.current) return;
       if (msg.type === 'LIVE_WEB_CAPTION' && msg.text) {
-        // If bridge is not connected, set status to web-only
-        if (connectionStatus === 'disconnected' || connectionStatus === 'connecting') {
-          setConnectionStatus('web-only');
-        }
+        setConnectionStatus((prev) => (prev === 'connected' ? 'connected' : 'web-only'));
 
         const clean = msg.text.trim();
         const delta = extractDeltaText(accumulatedTextRef.current, clean);
         if (delta && delta.length > 1 && clean !== lastCommittedTextRef.current) {
-          accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + delta;
-          lastCommittedTextRef.current = clean;
-          lastKnownVideoTimeRef.current = {
-            timestamp: msg.timestamp,
-            formattedTime: msg.formattedTime,
-          };
-          const newItem: LiveCaptionItem = {
-            id: crypto.randomUUID(),
-            text: delta,
-            timestamp: msg.timestamp,
-            formattedTime: msg.formattedTime,
-            isFinal: true,
-            source: 'web-caption',
-          };
+          activeLiveTextRef.current = delta;
+          setActiveLiveText(delta);
 
-          setCaptionItems((prev) => [...prev, newItem]);
-
-          if (autoAppend) {
-            const line = `\n- [${msg.formattedTime}](${pageUrl}#t=${Math.floor(msg.timestamp)}s) ${delta}`;
-            onInsertIntoNotes(line);
+          const isSentenceEnd = /[.?!]$/.test(delta) || /[.?!]$/.test(clean);
+          if (isSentenceEnd) {
+            if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
+            accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + delta;
+            lastCommittedTextRef.current = clean;
+            activeLiveTextRef.current = '';
+            setActiveLiveText('');
+            commitCaptionSentences(delta, 'web-caption');
+          } else {
+            if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
+            pauseTimerRef.current = setTimeout(async () => {
+              if (activeLiveTextRef.current && activeLiveTextRef.current.trim().length > 1) {
+                const pending = activeLiveTextRef.current.trim();
+                activeLiveTextRef.current = '';
+                setActiveLiveText('');
+                accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + pending;
+                lastCommittedTextRef.current = clean;
+                await commitCaptionSentences(pending, 'web-caption');
+              }
+            }, 1600);
           }
         }
       }
@@ -250,7 +292,7 @@ export const LiveCaptionsTab: React.FC<LiveCaptionsTabProps> = ({
         }
       });
     };
-  }, [isRecording, autoAppend, connectionStatus, pageUrl]);
+  }, []);
 
   // Actions
   function handleInsertAllIntoNotes() {

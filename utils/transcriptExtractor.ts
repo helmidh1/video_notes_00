@@ -81,6 +81,48 @@ export function extractDeltaText(accumulatedText: string, incomingText: string):
   return cleanIncoming;
 }
 
+/**
+ * Splits caption text into discrete sentences or short clause lines.
+ * Prevents run-on paragraphs by breaking on terminal punctuation (. ! ?)
+ * and natural clause boundaries (commas, semicolons, conjunctions) when length exceeds target words.
+ */
+export function splitCaptionIntoSentences(text: string, maxWordsPerLine: number = 24): string[] {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+
+  // Split on terminal punctuation followed by space or end of string
+  const rawSentences = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const result: string[] = [];
+
+  for (const sentence of rawSentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed) continue;
+
+    const words = trimmed.split(/\s+/);
+    if (words.length > maxWordsPerLine) {
+      let chunk: string[] = [];
+      for (let i = 0; i < words.length; i++) {
+        const word = words[i];
+        chunk.push(word);
+        const hasClausePunct = /[,;:]$/.test(word);
+        const isConjunction = /^(and|but|so|because|then|where|which|while)$/i.test(word);
+
+        if (chunk.length >= maxWordsPerLine || (chunk.length >= 14 && (hasClausePunct || isConjunction))) {
+          result.push(chunk.join(' ').trim());
+          chunk = [];
+        }
+      }
+      if (chunk.length > 0) {
+        result.push(chunk.join(' ').trim());
+      }
+    } else {
+      result.push(trimmed);
+    }
+  }
+
+  return result;
+}
+
 function extractFromTextTracks(video: HTMLVideoElement): TranscriptSegment[] {
   const segments: TranscriptSegment[] = [];
   const tracks = Array.from(video.textTracks || []);

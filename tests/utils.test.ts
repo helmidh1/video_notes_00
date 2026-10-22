@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatSeconds, parseTimeStringToSeconds, extractDeltaText } from '../utils/transcriptExtractor';
+import { formatSeconds, parseTimeStringToSeconds, extractDeltaText, splitCaptionIntoSentences } from '../utils/transcriptExtractor';
 import { generateTemplate } from '../utils/templates';
 import { generateObsidianFrontmatter } from '../utils/vaultStorage';
 
@@ -136,6 +136,23 @@ describe('Live Captions Integration', () => {
 
     const delta = extractDeltaText(accumulated, rollingIncoming);
     expect(delta).toBe("eleven twelve thirteen");
+  });
+
+  it('splits multi-sentence caption blocks into discrete lines', () => {
+    const multiSentence = "Brady, then let's go ahead and get started. So, as promised, today we're moving on to memory management.";
+    const result = splitCaptionIntoSentences(multiSentence);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toBe("Brady, then let's go ahead and get started.");
+    expect(result[1]).toBe("So, as promised, today we're moving on to memory management.");
+  });
+
+  it('breaks excessively long run-on sentences at natural clause boundaries', () => {
+    const longUtterance = "And they have very similar activities that go on so as we learn memory management a lot of that applies to the concepts of a file system just on different medium right and as we then progress into distributed systems";
+    const result = splitCaptionIntoSentences(longUtterance, 15);
+    expect(result.length).toBeGreaterThan(1);
+    for (const chunk of result) {
+      expect(chunk.split(/\s+/).length).toBeLessThanOrEqual(25);
+    }
   });
 });
 

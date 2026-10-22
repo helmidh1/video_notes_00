@@ -9,7 +9,8 @@
     "build": "wxt build",
     "zip": "wxt zip",
     "test": "vitest run",
-    "caption-bridge": "python companion/caption_bridge.py",
+    "caption-bridge": "node companion/launch_bridge.js",
+    "companion/caption-bridge": "node companion/launch_bridge.js",
     "postinstall": "wxt prepare"
   },
   "dependencies": {

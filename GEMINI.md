@@ -143,8 +143,10 @@ video_notes_00/
 - **Ordered Last Note Lookup**: `getLastRecordedTimestamp(markdown)` retrieves the most recently appended note entry in document order rather than just the mathematical maximum second.
 
 ### 4. Chrome Live Caption Desktop Bridge (`companion/caption_bridge.py`)
-- Connects to Windows UI Automation (`uiautomation`) to read Chrome's floating Live Caption window (`Chrome_WidgetWin_1`).
-- Runs a local WebSocket server at `ws://localhost:8765`.
+- Cross-platform native accessibility bridge:
+  - **Linux**: Connects to AT-SPI2 D-Bus (`pyatspi`) to read Chrome / Chromium's native Live Caption alert dialog.
+  - **Windows**: Connects to Windows UI Automation (`uiautomation`) to read Chrome's floating Live Caption window (`Chrome_WidgetWin_1`) and Windows 11 Live Captions (`Win + Ctrl + L`).
+- Runs a local WebSocket server at `ws://127.0.0.1:8765` managed seamlessly via `npm run caption-bridge` (with cross-platform runner `companion/launch_bridge.js`).
 - Broadcasts real-time transcript chunks directly to `LiveCaptionsTab.tsx` with delta-deduplication, allowing seamless note-taking even when YouTube or third-party web captions are unavailable or closed.
 
 ---
