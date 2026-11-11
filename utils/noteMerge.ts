@@ -247,7 +247,7 @@ export function parseFramesFromMarkdown(markdown: string): string[] {
 }
 
 interface MarkdownBlock {
-  type: 'timestamp' | 'section' | 'text';
+  type: 'timestamp' | 'section' | 'caption' | 'text';
   seconds?: number;
   formattedTime?: string;
   imageFileName?: string;
@@ -258,7 +258,7 @@ function parseMarkdownIntoBlocks(body: string): MarkdownBlock[] {
   const lines = body.split(/\r?\n/);
   const blocks: MarkdownBlock[] = [];
   let currentBlock: string[] = [];
-  let currentType: 'timestamp' | 'section' | 'text' = 'text';
+  let currentType: 'timestamp' | 'section' | 'caption' | 'text' = 'text';
   let currentSeconds: number | undefined;
   let currentFormattedTime: string | undefined;
   let currentImg: string | undefined;
@@ -285,7 +285,9 @@ function parseMarkdownIntoBlocks(body: string): MarkdownBlock[] {
   for (const line of lines) {
     // Check if line is a timestamp header: e.g. "### [01:23]" or "### [01:23](...)"
     const tsMatch = line.match(/^###\s+\[(?:(\d{1,2}):)?(\d{1,3}):([0-5]\d)\](?:\([^)]*\))?|^###\s+(?:(\d{1,2}):)?(\d{1,3}):([0-5]\d)/);
-    const headerMatch = line.match(/^#{1,2}\s+(.*)/);
+    // Check if line is a timestamped caption bullet: e.g. "- [01:23](url#t=83s) caption text"
+    const bulletTsMatch = line.match(/^\s*[-*]\s+\[(?:(\d{1,2}):)?(\d{1,3}):([0-5]\d)\](?:\([^)]*\))?(?:\s+.*)?$/);
+    const headerMatch = line.match(/^#{1,3}\s+(.*)/);
 
     if (tsMatch) {
       commitBlock();
@@ -297,6 +299,18 @@ function parseMarkdownIntoBlocks(body: string): MarkdownBlock[] {
       currentFormattedTime = timePart;
       currentSeconds = parseTimeStringToSeconds(timePart);
       currentBlock.push(line);
+    } else if (bulletTsMatch) {
+      commitBlock();
+      const hh = bulletTsMatch[1];
+      const mm = bulletTsMatch[2];
+      const ss = bulletTsMatch[3];
+      const timePart = (hh ? `${hh}:` : '') + `${mm.padStart(2, '0')}:${ss}`;
+      blocks.push({
+        type: 'caption',
+        seconds: parseTimeStringToSeconds(timePart),
+        formattedTime: timePart,
+        content: line.trim(),
+      });
     } else if (headerMatch) {
       commitBlock();
       currentType = 'section';
@@ -360,7 +374,7 @@ export function mergeMarkdownNotes(existingMarkdown: string, incomingMarkdown: s
   const existingContents = new Set<string>();
 
   for (const b of existingBlocks) {
-    if (b.seconds !== undefined) existingTimes.add(b.seconds);
+    if (b.type === 'timestamp' && b.seconds !== undefined) existingTimes.add(b.seconds);
     if (b.imageFileName) existingImages.add(b.imageFileName);
     existingContents.add(b.content.replace(/\s+/g, ' ').trim());
   }
@@ -373,11 +387,28 @@ export function mergeMarkdownNotes(existingMarkdown: string, incomingMarkdown: s
       continue;
     }
 
-    // 2. If it's a timestamp block
-    if (inBlock.seconds !== undefined) {
+    // 2. Timestamped caption bullets (- [MM:SS](...) text): preserve non-duplicates chronologically
+    if (inBlock.type === 'caption' && inBlock.seconds !== undefined) {
+      existingContents.add(normContent);
+      let inserted = false;
+      for (let i = 0; i < mergedBlocks.length; i++) {
+        if (mergedBlocks[i].seconds !== undefined && mergedBlocks[i].seconds! > inBlock.seconds) {
+          mergedBlocks.splice(i, 0, inBlock);
+          inserted = true;
+          break;
+        }
+      }
+      if (!inserted) {
+        mergedBlocks.push(inBlock);
+      }
+      continue;
+    }
+
+    // 3. If it's a timestamp header block (### [MM:SS])
+    if (inBlock.type === 'timestamp' && inBlock.seconds !== undefined) {
       if (existingTimes.has(inBlock.seconds)) {
         // Find existing timestamp block to see if we can augment it
-        const target = mergedBlocks.find((b) => b.seconds === inBlock.seconds);
+        const target = mergedBlocks.find((b) => b.type === 'timestamp' && b.seconds === inBlock.seconds);
         if (target && !target.content.includes(inBlock.content)) {
           // If incoming has an AI callout, quote, or image embed, augment this block
           const extraLines = inBlock.content
@@ -439,7 +470,15 @@ export function mergeMarkdownNotes(existingMarkdown: string, incomingMarkdown: s
     }
   }
 
-  const mergedBody = mergedBlocks.map((b) => b.content).join('\n\n');
+  let mergedBody = '';
+  for (let i = 0; i < mergedBlocks.length; i++) {
+    if (i > 0) {
+      const prevType = mergedBlocks[i - 1].type;
+      const currType = mergedBlocks[i].type;
+      mergedBody += prevType === 'caption' && currType === 'caption' ? '\n' : '\n\n';
+    }
+    mergedBody += mergedBlocks[i].content;
+  }
 
   // Build combined frontmatter
   const finalFm = buildFrontmatter({

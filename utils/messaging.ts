@@ -5,7 +5,7 @@ export type ExtensionMessage =
   | { type: 'TOGGLE_PLAY' }
   | { type: 'SET_PLAYBACK_RATE'; rate: number }
   | { type: 'EXTRACT_TRANSCRIPT' }
-  | { type: 'START_LIVE_CAPTIONS' }
+  | { type: 'START_LIVE_CAPTIONS'; autoEnableCC?: boolean }
   | { type: 'STOP_LIVE_CAPTIONS' }
   | { type: 'LIVE_WEB_CAPTION'; text: string; timestamp: number; formattedTime: string }
   | {
@@ -14,7 +14,9 @@ export type ExtensionMessage =
       formattedTime: string;
       duration: number;
       paused?: boolean;
+      pageTitle?: string;
       pageUrl?: string;
+      updatedAt?: number;
     }
   | { type: 'HOTKEY_COMMAND'; command: string };
 
@@ -24,7 +26,7 @@ export interface LiveCaptionItem {
   timestamp: number;
   formattedTime: string;
   isFinal: boolean;
-  source: 'chrome-live-caption' | 'windows-live-caption' | 'web-caption';
+  source: 'chrome-live-caption' | 'windows-live-caption' | 'web-caption' | 'speech-recognition';
 }
 
 export interface VideoStateResponse {

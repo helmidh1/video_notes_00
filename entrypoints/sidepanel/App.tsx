@@ -18,6 +18,9 @@ import {
   selectVaultDirectory,
   reauthorizeVault,
   generateObsidianFrontmatter,
+  checkVaultPermissionStatus,
+  openNoteInObsidian,
+  downloadMarkdownFile,
 } from '../../utils/vaultStorage';
 import {
   parseTimestampsFromMarkdown,
@@ -36,6 +39,7 @@ import {
   analyzeVideoFrameWithGemini,
 } from '../../utils/geminiClient';
 import { generateTemplate, type TemplateType } from '../../utils/templates';
+import { formatSeconds } from '../../utils/transcriptExtractor';
 import { Toolbar } from './components/Toolbar';
 import { Editor } from './components/Editor';
 import { FrameGallery, type CapturedFrame } from './components/FrameGallery';
@@ -58,6 +62,55 @@ import {
   Play,
 } from 'lucide-react';
 import './styles/theme.css';
+
+interface SaveSnapshot {
+  markdown: string;
+  title: string;
+  frames: CapturedFrame[];
+  pageUrl: string;
+  existingFileName: string | null;
+  baseContent: string;
+  lastSavedMarkdown: string;
+  lastSavedTitle: string;
+  silent: boolean;
+}
+
+function isIgnoredBrowserUrl(url?: string): boolean {
+  if (!url) return true;
+  const lower = url.toLowerCase();
+  return (
+    lower.startsWith('chrome://') ||
+    lower.startsWith('edge://') ||
+    lower.startsWith('about:') ||
+    lower.startsWith('chrome-extension://') ||
+    lower.startsWith('devtools://')
+  );
+}
+
+function isKnownVideoUrl(url: string): boolean {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  if (lower.startsWith('file://')) return true;
+  if (
+    lower.includes('youtube.com/watch') ||
+    lower.includes('youtube.com/shorts/') ||
+    lower.includes('youtube.com/live/') ||
+    lower.includes('youtu.be/') ||
+    lower.includes('coursera.org/learn/') ||
+    lower.includes('udemy.com/course/') ||
+    lower.includes('vimeo.com/') ||
+    lower.includes('instructure.com') ||
+    lower.includes('panopto.') ||
+    lower.includes('kaltura.') ||
+    lower.includes('echo360.') ||
+    lower.includes('loom.com/') ||
+    lower.includes('twitch.tv/')
+  ) {
+    return true;
+  }
+  const clean = lower.split('#')[0].split('?')[0];
+  return /\.(mp4|webm|mov|m4v|m3u8|mkv)$/.test(clean);
+}
 
 export default function App() {
   const [apiKey, setApiKey] = useState('');
@@ -108,14 +161,32 @@ export default function App() {
   framesRef.current = frames;
   const pageUrlRef = useRef(pageUrl);
   pageUrlRef.current = pageUrl;
+  const existingVaultFileNameRef = useRef<string | null>(existingVaultFileName);
+  existingVaultFileNameRef.current = existingVaultFileName;
 
   const lastSavedMarkdownRef = useRef<string>('');
   const lastSavedTitleRef = useRef<string>('');
   const lastKnownDiskContentRef = useRef<string>('');
   const lastKnownFileModifiedRef = useRef<number>(0);
+  const lastSavedDiskByUrlRef = useRef<Map<string, string>>(new Map());
   const savedFrameIdsRef = useRef<Set<string>>(new Set());
   const isSavingRef = useRef<boolean>(false);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const isCheckingVaultRef = useRef<boolean>(false);
+  const isProvisionalTitleRef = useRef<boolean>(true);
+  const currentWindowIdRef = useRef<number | undefined>(undefined);
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushCaptionsRef = useRef<(() => void) | null>(null);
+  const activeLoadSeqRef = useRef<number>(0);
+  const tabSwitchSeqRef = useRef<number>(0);
+
+  // Synchronously update markdownRef before queuing React state update so context flushes never read stale text
+  function updateMarkdown(updater: React.SetStateAction<string>) {
+    const current = markdownRef.current;
+    const next = typeof updater === 'function' ? updater(current) : updater;
+    markdownRef.current = next;
+    setMarkdown(next);
+  }
 
   // Dynamic timestamp extraction across markdown and saved vault file (chronological for timeline)
   const timestamps = useMemo(() => {
@@ -176,25 +247,41 @@ export default function App() {
     urlToUse?: string,
     forceReload = false
   ) {
-    if (isCheckingVaultRef.current) return;
+    const loadSeq = ++activeLoadSeqRef.current;
     const targetTitle = titleToUse || noteTitleRef.current;
     const targetUrl = urlToUse || pageUrlRef.current;
+    const cleanSessionKey = 'session_' + (targetUrl.split('#')[0] || targetTitle);
 
     // Load persisted video playback position from chrome.storage.local
     if (typeof chrome !== 'undefined' && chrome.storage?.local) {
       const cleanUrl = targetUrl.split('#')[0].replace(/[?&]t=\d+s?/, '');
       const posKey = 'video_pos_' + cleanUrl;
       chrome.storage.local.get([posKey]).then((stored) => {
+        if (loadSeq !== activeLoadSeqRef.current) return;
         if (stored?.[posKey]) {
           setSavedVideoPosition(stored[posKey]);
         }
       }).catch(() => {});
     }
 
+    let cachedSession: { markdown?: string; title?: string; updatedAt?: number } | null = null;
+    if (!forceReload && typeof chrome !== 'undefined' && chrome.storage?.local) {
+      try {
+        const stored = await chrome.storage.local.get([cleanSessionKey]);
+        if (loadSeq !== activeLoadSeqRef.current) return;
+        if (stored?.[cleanSessionKey]?.markdown) {
+          cachedSession = stored[cleanSessionKey];
+        }
+      } catch {
+        // Ignored
+      }
+    }
+
     // 1. PRIMARY SOURCE OF TRUTH: Query Obsidian vault directory first
     let dirHandle: FileSystemDirectoryHandle | null = null;
     try {
       dirHandle = await getSavedVaultDirectory();
+      if (loadSeq !== activeLoadSeqRef.current) return;
     } catch {
       // Ignored
     }
@@ -202,34 +289,48 @@ export default function App() {
     if (dirHandle) {
       isCheckingVaultRef.current = true;
       try {
-        const match = await findExistingNote(dirHandle, targetTitle, targetUrl);
+        const searchTitle = targetTitle === 'Video Notes' ? '' : targetTitle;
+        const match = await findExistingNote(dirHandle, searchTitle, targetUrl);
+        if (loadSeq !== activeLoadSeqRef.current) return;
+
         if (match && match.content) {
           setExistingVaultMarkdown(match.content);
           setExistingVaultFileName(match.fileName);
+          existingVaultFileNameRef.current = match.fileName;
 
           const foundTimestamps = parseTimestampsFromMarkdown(match.content);
 
-          // Adopt title from frontmatter or filename if available
+          // Adopt title from frontmatter or filename if available and lock against provisional tab updates
           const fm = extractFrontmatter(match.content);
           const resolvedTitle = fm.title || match.fileName.replace(/\.md$/, '') || targetTitle;
-          if (resolvedTitle && (noteTitleRef.current === 'Video Notes' || !noteTitleRef.current)) {
+          if (resolvedTitle) {
             setNoteTitle(resolvedTitle);
             noteTitleRef.current = resolvedTitle;
+            isProvisionalTitleRef.current = false;
           }
 
-          // Populate editor with exact Obsidian file content and sync all tracking refs
-          setMarkdown(match.content);
-          markdownRef.current = match.content;
+          // Reconcile newer local session edits captured before disk write completed
+          const hasNewerSessionCache =
+            !forceReload &&
+            Boolean(cachedSession?.markdown) &&
+            cachedSession!.markdown!.trim() !== match.content.trim() &&
+            (cachedSession!.updatedAt || 0) > (match.lastModified || 0);
+
+          const nextMarkdown = hasNewerSessionCache ? cachedSession!.markdown! : match.content;
+
+          // Populate editor with Obsidian file content (or newer local cache) and sync tracking refs
+          updateMarkdown(nextMarkdown);
           lastSavedMarkdownRef.current = match.content;
           lastSavedTitleRef.current = resolvedTitle;
           lastKnownDiskContentRef.current = match.content;
           lastKnownFileModifiedRef.current = match.lastModified || Date.now();
-          setHasUnsavedChanges(false);
+          lastSavedDiskByUrlRef.current.set(targetUrl.split('#')[0], match.content);
+          setHasUnsavedChanges(hasNewerSessionCache);
 
-          // Rehydrate frame attachments from vault attachments directory
-          const frameNames = parseFramesFromMarkdown(match.content);
+          // Rehydrate frame attachments from vault attachments directory (always update to clear stale frames)
+          const frameNames = parseFramesFromMarkdown(nextMarkdown);
+          const restoredFrames: CapturedFrame[] = [];
           if (frameNames.length > 0) {
-            const restoredFrames: CapturedFrame[] = [];
             for (const fn of frameNames) {
               const existingFrame = framesRef.current.find((f) => f.fileName === fn);
               if (existingFrame) {
@@ -237,6 +338,7 @@ export default function App() {
                 savedFrameIdsRef.current.add(existingFrame.id);
               } else {
                 const dataUrl = await readBinaryAttachment(dirHandle, fn);
+                if (loadSeq !== activeLoadSeqRef.current) return;
                 if (dataUrl) {
                   const ts = foundTimestamps.find((t) => t.imageFileName === fn);
                   const newF: CapturedFrame = {
@@ -252,17 +354,14 @@ export default function App() {
                 }
               }
             }
-            if (restoredFrames.length > 0) {
-              setFrames(restoredFrames);
-              framesRef.current = restoredFrames;
-            }
           }
+          setFrames(restoredFrames);
+          framesRef.current = restoredFrames;
 
-          // Keep local storage session cache synchronized with latest disk content
-          if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-            const cleanKey = 'session_' + (targetUrl.split('#')[0] || resolvedTitle);
+          // Keep local storage session cache synchronized when disk won
+          if (!hasNewerSessionCache && typeof chrome !== 'undefined' && chrome.storage?.local) {
             chrome.storage.local.set({
-              [cleanKey]: {
+              [cleanSessionKey]: {
                 markdown: match.content,
                 title: resolvedTitle,
                 url: targetUrl,
@@ -272,7 +371,9 @@ export default function App() {
           }
 
           showStatus(
-            `Loaded note from Obsidian (${foundTimestamps.length} timestamps).`,
+            hasNewerSessionCache
+              ? `Restored newer local edits alongside Obsidian note (${foundTimestamps.length} timestamps).`
+              : `Loaded note from Obsidian (${foundTimestamps.length} timestamps).`,
             'success',
             3000
           );
@@ -281,26 +382,28 @@ export default function App() {
       } catch (err) {
         console.warn('Error checking existing note in vault:', err);
       } finally {
-        isCheckingVaultRef.current = false;
+        if (loadSeq === activeLoadSeqRef.current) {
+          isCheckingVaultRef.current = false;
+        }
       }
     }
 
     // 2. FALLBACK ONLY: If vault directory is unavailable or note is not in vault yet
-    if (!forceReload && !markdownRef.current.trim() && typeof chrome !== 'undefined' && chrome.storage?.local) {
-      try {
-        const cleanKey = 'session_' + (targetUrl.split('#')[0] || targetTitle);
-        const stored = await chrome.storage.local.get([cleanKey]);
-        if (stored?.[cleanKey]?.markdown && !markdownRef.current.trim()) {
-          const cached = stored[cleanKey];
-          setMarkdown(cached.markdown);
-          markdownRef.current = cached.markdown;
-          lastSavedMarkdownRef.current = cached.markdown;
-          lastSavedTitleRef.current = cached.title || targetTitle;
-          setHasUnsavedChanges(false);
-        }
-      } catch {
-        // Ignored
+    if (loadSeq !== activeLoadSeqRef.current) return;
+    if (!forceReload && !markdownRef.current.trim() && cachedSession?.markdown) {
+      if (
+        cachedSession.title &&
+        cachedSession.title !== 'Video Notes' &&
+        (isProvisionalTitleRef.current || noteTitleRef.current === 'Video Notes')
+      ) {
+        setNoteTitle(cachedSession.title);
+        noteTitleRef.current = cachedSession.title;
       }
+      updateMarkdown(cachedSession.markdown);
+      // Session cache has not yet been written to Obsidian vault: keep unsaved so auto-save commits it
+      lastSavedMarkdownRef.current = '';
+      lastSavedTitleRef.current = '';
+      setHasUnsavedChanges(true);
     }
   }
 
@@ -318,8 +421,10 @@ export default function App() {
     try {
       const targetTitle = noteTitleRef.current;
       const targetUrl = pageUrlRef.current;
-      const match = await findExistingNote(dirHandle, targetTitle, targetUrl);
+      const searchTitle = targetTitle === 'Video Notes' ? '' : targetTitle;
+      const match = await findExistingNote(dirHandle, searchTitle, targetUrl);
       if (!match || !match.content) return;
+      if (pageUrlRef.current.split('#')[0] !== targetUrl.split('#')[0]) return;
 
       const diskContent = match.content;
       const lastKnownDisk = lastKnownDiskContentRef.current;
@@ -332,11 +437,12 @@ export default function App() {
           // Seamlessly update editor with the new Obsidian content
           setExistingVaultMarkdown(diskContent);
           setExistingVaultFileName(match.fileName);
-          setMarkdown(diskContent);
-          markdownRef.current = diskContent;
+          existingVaultFileNameRef.current = match.fileName;
+          updateMarkdown(diskContent);
           lastSavedMarkdownRef.current = diskContent;
           lastKnownDiskContentRef.current = diskContent;
           lastKnownFileModifiedRef.current = match.lastModified || Date.now();
+          lastSavedDiskByUrlRef.current.set(targetUrl.split('#')[0], diskContent);
           setHasUnsavedChanges(false);
 
           if (typeof chrome !== 'undefined' && chrome.storage?.local) {
@@ -362,6 +468,83 @@ export default function App() {
     }
   }
 
+  const hotkeyHandlersRef = useRef<{
+    handleCaptureFrame: () => Promise<void>;
+    handleInsertTimestamp: () => Promise<void>;
+    handleTogglePlay: () => Promise<void>;
+  } | null>(null);
+
+  function captureSaveSnapshot(silent: boolean): SaveSnapshot {
+    return {
+      markdown: markdownRef.current,
+      title: noteTitleRef.current,
+      frames: framesRef.current,
+      pageUrl: pageUrlRef.current,
+      existingFileName: existingVaultFileNameRef.current,
+      baseContent: lastKnownDiskContentRef.current,
+      lastSavedMarkdown: lastSavedMarkdownRef.current,
+      lastSavedTitle: lastSavedTitleRef.current,
+      silent,
+    };
+  }
+
+  function switchNoteContext(newTitle: string, newUrl: string) {
+    const prevUrl = pageUrlRef.current;
+    const prevTitle = noteTitleRef.current;
+
+    // 1. Flush pending buffered captions and queue unsaved outgoing note save before resetting state
+    if (prevUrl && prevUrl.split('#')[0] !== newUrl.split('#')[0]) {
+      flushCaptionsRef.current?.();
+
+      const hasContent = Boolean(markdownRef.current.trim() || framesRef.current.length > 0);
+      const isDirty =
+        markdownRef.current !== lastSavedMarkdownRef.current ||
+        prevTitle !== lastSavedTitleRef.current ||
+        framesRef.current.some((f) => !savedFrameIdsRef.current.has(f.id));
+
+      if (hasContent && isDirty) {
+        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+          const prevSessionKey = 'session_' + (prevUrl.split('#')[0] || prevTitle);
+          chrome.storage.local.set({
+            [prevSessionKey]: {
+              markdown: markdownRef.current,
+              title: prevTitle,
+              url: prevUrl,
+              updatedAt: Date.now(),
+            },
+          }).catch(() => {});
+        }
+        // Snapshot outgoing note synchronously and serialize onto saveQueueRef so in-flight saves never drop it
+        const outgoingSnapshot = captureSaveSnapshot(true);
+        void performSaveToVault(true, outgoingSnapshot);
+      }
+    }
+
+    // 2. Unconditionally reset state and tracking refs for the new video context
+    isProvisionalTitleRef.current = true;
+    setNoteTitle(newTitle);
+    noteTitleRef.current = newTitle;
+    setPageUrl(newUrl);
+    pageUrlRef.current = newUrl;
+    updateMarkdown('');
+    setFrames([]);
+    framesRef.current = [];
+    savedFrameIdsRef.current = new Set();
+    lastSavedMarkdownRef.current = '';
+    lastSavedTitleRef.current = newTitle;
+    lastKnownDiskContentRef.current = '';
+    lastKnownFileModifiedRef.current = 0;
+    setExistingVaultMarkdown('');
+    setExistingVaultFileName(null);
+    existingVaultFileNameRef.current = null;
+    setHasUnsavedChanges(false);
+    setLiveVideoTime(null);
+    setSavedVideoPosition(null);
+
+    // 3. Load vault / session note for the new video
+    void checkAndLoadExistingNote(newTitle, newUrl);
+  }
+
   // Load saved API key, model, and vault on initialization
   useEffect(() => {
     getGeminiApiKey().then((savedKey) => {
@@ -376,6 +559,20 @@ export default function App() {
       if (name) setVaultName(name);
     });
 
+    checkVaultPermissionStatus().then((perm) => {
+      if (perm === 'prompt' || perm === 'denied') {
+        setVaultPermissionNeeded(true);
+      } else if (perm === 'granted') {
+        setVaultPermissionNeeded(false);
+      }
+    });
+
+    if (typeof chrome !== 'undefined' && chrome.windows?.getCurrent) {
+      chrome.windows.getCurrent().then((win) => {
+        if (win?.id !== undefined) currentWindowIdRef.current = win.id;
+      }).catch(() => {});
+    }
+
     if (typeof chrome !== 'undefined' && chrome.storage?.local) {
       chrome.storage.local.get(['auto_save_enabled'], (res) => {
         if (res && res.auto_save_enabled !== undefined) {
@@ -384,50 +581,187 @@ export default function App() {
       });
     }
 
+    const isVideoOrNoteTab = async (tab: chrome.tabs.Tab): Promise<boolean> => {
+      if (!tab?.url || isIgnoredBrowserUrl(tab.url)) return false;
+      // On initial startup with no note context yet, adopt the active tab
+      if (!pageUrlRef.current) return true;
+      if (isKnownVideoUrl(tab.url)) return true;
+
+      if (tab.id && typeof chrome !== 'undefined' && chrome.tabs?.sendMessage) {
+        try {
+          const state = await chrome.tabs.sendMessage<ExtensionMessage, VideoStateResponse>(
+            tab.id,
+            { type: 'GET_VIDEO_STATE' }
+          );
+          if (state?.ok) return true;
+        } catch {
+          // Content script unavailable or no video on page
+        }
+      }
+
+      try {
+        const dirHandle = await getSavedVaultDirectory(false);
+        if (dirHandle) {
+          const rawTitle = tab.title ? tab.title.replace(/ - YouTube$/, '').trim() : '';
+          const searchTitle =
+            rawTitle === 'Video Notes' || rawTitle === noteTitleRef.current ? '' : rawTitle;
+          const match = await findExistingNote(dirHandle, searchTitle, tab.url);
+          if (match) return true;
+        }
+      } catch {
+        // Ignored
+      }
+
+      return false;
+    };
+
+    const syncActiveTab = (tab: chrome.tabs.Tab, forceProvisionalTitle = false) => {
+      if (!tab?.url || isIgnoredBrowserUrl(tab.url)) return;
+      const rawTitle = forceProvisionalTitle ? '' : tab.title;
+      const tTitle = rawTitle ? rawTitle.replace(/ - YouTube$/, '').trim() || 'Video Notes' : 'Video Notes';
+      const tUrl = tab.url;
+
+      switchNoteContext(tTitle, tUrl);
+
+      if (tab.id) {
+        chrome.tabs.sendMessage<ExtensionMessage, VideoStateResponse>(tab.id, {
+          type: 'GET_VIDEO_STATE',
+        }).then((state) => {
+          if (pageUrlRef.current.split('#')[0] !== tUrl.split('#')[0]) return;
+          if (state?.ok && state.currentTime !== undefined) {
+            setLiveVideoTime({
+              currentTime: state.currentTime,
+              formattedTime: state.formattedTime || formatSeconds(state.currentTime),
+              duration: state.duration || 0,
+              paused: state.paused,
+            });
+          }
+        }).catch(() => {});
+      }
+    };
+
     // Check active tab info if in extension environment
     if (typeof chrome !== 'undefined' && chrome.tabs?.query) {
       chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-        let tTitle = noteTitle;
-        let tUrl = pageUrl;
-        if (tab?.title) {
-          tTitle = tab.title.replace(/ - YouTube$/, '');
-          setNoteTitle(tTitle);
-          noteTitleRef.current = tTitle;
-          lastSavedTitleRef.current = tTitle;
-        }
-        if (tab?.url) {
-          tUrl = tab.url;
-          setPageUrl(tUrl);
-          pageUrlRef.current = tUrl;
-        }
-        checkAndLoadExistingNote(tTitle, tUrl);
-
-        if (tab?.id) {
-          chrome.tabs.sendMessage<ExtensionMessage, VideoStateResponse>(tab.id, {
-            type: 'GET_VIDEO_STATE',
-          }).then((state) => {
-            if (state?.ok && state.currentTime !== undefined) {
-              setLiveVideoTime({
-                currentTime: state.currentTime,
-                formattedTime: state.formattedTime || formatSeconds(state.currentTime),
-                duration: state.duration || 0,
-                paused: state.paused,
-              });
-            }
-          }).catch(() => {});
-        }
+        if (tab) syncActiveTab(tab);
       }).catch(() => {});
+    }
+
+    // Listen for tab switching / activation (ignore non-video reference tabs once an active note is open)
+    const tabActivatedListener = (activeInfo: chrome.tabs.TabActiveInfo) => {
+      if (currentWindowIdRef.current !== undefined && activeInfo.windowId !== currentWindowIdRef.current) {
+        return;
+      }
+      if (typeof chrome !== 'undefined' && chrome.tabs?.get) {
+        const switchSeq = ++tabSwitchSeqRef.current;
+        chrome.tabs.get(activeInfo.tabId).then(async (tab) => {
+          if (switchSeq !== tabSwitchSeqRef.current) return;
+          if (!tab?.url || isIgnoredBrowserUrl(tab.url)) return;
+          if (tab.url.split('#')[0] === pageUrlRef.current.split('#')[0]) return;
+          const shouldSwitch = await isVideoOrNoteTab(tab);
+          if (!shouldSwitch || switchSeq !== tabSwitchSeqRef.current) return;
+          if (tab.url.split('#')[0] === pageUrlRef.current.split('#')[0]) return;
+          syncActiveTab(tab);
+        }).catch(() => {});
+      }
+    };
+
+    // Listen for tab URL updates (e.g. video navigation)
+    const tabUpdatedListener = (_tabId: number, changeInfo: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => {
+      if (!tab.active) return;
+      if (currentWindowIdRef.current !== undefined && tab.windowId !== currentWindowIdRef.current) {
+        return;
+      }
+      if (
+        changeInfo.title &&
+        tab.url &&
+        tab.url.split('#')[0] === pageUrlRef.current.split('#')[0] &&
+        isProvisionalTitleRef.current
+      ) {
+        const cleaned = changeInfo.title.replace(/ - YouTube$/, '').trim();
+        if (cleaned && cleaned !== noteTitleRef.current) {
+          setNoteTitle(cleaned);
+          noteTitleRef.current = cleaned;
+        }
+      }
+      if (changeInfo.status === 'complete' || changeInfo.url) {
+        if (!tab.url || isIgnoredBrowserUrl(tab.url)) return;
+        if (tab.url.split('#')[0] === pageUrlRef.current.split('#')[0]) return;
+        const switchSeq = ++tabSwitchSeqRef.current;
+        const outgoingTitle = noteTitleRef.current;
+        const provisionalOnUrlChange = Boolean(
+          changeInfo.url && !changeInfo.title && pageUrlRef.current
+        );
+        void isVideoOrNoteTab(tab).then(async (shouldSwitch) => {
+          if (!shouldSwitch || switchSeq !== tabSwitchSeqRef.current) return;
+          if (!tab.url || tab.url.split('#')[0] === pageUrlRef.current.split('#')[0]) return;
+          let latestTab = tab;
+          if (provisionalOnUrlChange && tab.id && typeof chrome !== 'undefined' && chrome.tabs?.get) {
+            latestTab = await chrome.tabs.get(tab.id).catch(() => tab);
+            if (switchSeq !== tabSwitchSeqRef.current) return;
+          }
+          const cleanedLatestTitle = (latestTab.title || '').replace(/ - YouTube$/, '').trim();
+          const useProvisionalTitle =
+            provisionalOnUrlChange &&
+            (latestTab.status === 'loading' ||
+              !cleanedLatestTitle ||
+              cleanedLatestTitle === outgoingTitle);
+          syncActiveTab(latestTab, useProvisionalTitle);
+        });
+      }
+    };
+
+    if (typeof chrome !== 'undefined' && chrome.tabs?.onActivated) {
+      chrome.tabs.onActivated.addListener(tabActivatedListener);
+    }
+    if (typeof chrome !== 'undefined' && chrome.tabs?.onUpdated) {
+      chrome.tabs.onUpdated.addListener(tabUpdatedListener);
     }
 
     // Listen for background hotkey broadcasts and real-time video playback updates
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
-      const messageListener = (msg: ExtensionMessage) => {
+      const messageListener = (msg: ExtensionMessage, sender?: chrome.runtime.MessageSender) => {
         if (msg.type === 'HOTKEY_COMMAND') {
-          if (msg.command === 'capture_frame') handleCaptureFrame();
-          if (msg.command === 'insert_timestamp') handleInsertTimestamp();
-          if (msg.command === 'toggle_play') handleTogglePlay();
+          if (msg.command === 'capture_frame') hotkeyHandlersRef.current?.handleCaptureFrame();
+          if (msg.command === 'insert_timestamp') hotkeyHandlersRef.current?.handleInsertTimestamp();
+          if (msg.command === 'toggle_play') hotkeyHandlersRef.current?.handleTogglePlay();
+          return;
         }
         if (msg.type === 'VIDEO_TIME_UPDATE') {
+          if (sender?.tab) {
+            if (!sender.tab.active) return;
+            if (currentWindowIdRef.current !== undefined && sender.tab.windowId !== currentWindowIdRef.current) {
+              return;
+            }
+          }
+
+          // Only top-level frame changes should trigger SPA page context switches
+          const isTopFrame = !sender?.frameId || sender.frameId === 0;
+          if (
+            isTopFrame &&
+            msg.pageUrl &&
+            pageUrlRef.current &&
+            msg.pageUrl.split('#')[0] !== pageUrlRef.current.split('#')[0]
+          ) {
+            const newUrl = msg.pageUrl;
+            const rawSpaTitle = (msg.pageTitle || '').replace(/ - YouTube$/, '').trim();
+            // If SPA navigation still carries the outgoing video's title, start provisional so real title updates cleanly
+            const newTitle =
+              rawSpaTitle && rawSpaTitle !== noteTitleRef.current ? rawSpaTitle : 'Video Notes';
+            switchNoteContext(newTitle, newUrl);
+          } else if (
+            isTopFrame &&
+            msg.pageTitle &&
+            isProvisionalTitleRef.current &&
+            (!msg.pageUrl || msg.pageUrl.split('#')[0] === pageUrlRef.current.split('#')[0])
+          ) {
+            const cleaned = msg.pageTitle.replace(/ - YouTube$/, '').trim();
+            if (cleaned && cleaned !== noteTitleRef.current) {
+              setNoteTitle(cleaned);
+              noteTitleRef.current = cleaned;
+            }
+          }
+
           setLiveVideoTime({
             currentTime: msg.currentTime,
             formattedTime: msg.formattedTime,
@@ -445,6 +779,12 @@ export default function App() {
       chrome.runtime.onMessage.addListener(messageListener);
 
       return () => {
+        if (typeof chrome !== 'undefined' && chrome.tabs?.onActivated) {
+          chrome.tabs.onActivated.removeListener(tabActivatedListener);
+        }
+        if (typeof chrome !== 'undefined' && chrome.tabs?.onUpdated) {
+          chrome.tabs.onUpdated.removeListener(tabUpdatedListener);
+        }
         chrome.runtime.onMessage.removeListener(messageListener);
       };
     }
@@ -472,9 +812,16 @@ export default function App() {
   }, []);
 
   function showStatus(message: string, type: 'info' | 'success' | 'error' = 'info', timeoutMs = 4000) {
+    if (statusTimerRef.current) {
+      clearTimeout(statusTimerRef.current);
+      statusTimerRef.current = null;
+    }
     setStatus({ message, type });
     if (timeoutMs > 0) {
-      setTimeout(() => setStatus(null), timeoutMs);
+      statusTimerRef.current = setTimeout(() => {
+        statusTimerRef.current = null;
+        setStatus(null);
+      }, timeoutMs);
     }
   }
 
@@ -483,7 +830,7 @@ export default function App() {
     if (typeof chrome !== 'undefined' && chrome.storage?.local) {
       chrome.storage.local.set({ auto_save_enabled: enabled });
     }
-    showStatus(`Auto-save ${enabled ? 'enabled (15s interval + on pause)' : 'disabled'}`, 'info', 2500);
+    showStatus(`Auto-save ${enabled ? 'enabled (2.5s after edits & 15s heartbeat)' : 'disabled'}`, 'info', 2500);
   }
 
   async function handleApiKeyChange(newKey: string) {
@@ -583,8 +930,8 @@ export default function App() {
       }
 
       const fileName = `frame-${Date.now()}.webp`;
-      const resolvedTitle = response.pageTitle || noteTitle;
-      const targetUrl = response.pageUrl || pageUrl || tab.url || '';
+      const resolvedTitle = response.pageTitle || noteTitleRef.current;
+      const targetUrl = response.pageUrl || pageUrlRef.current || tab.url || '';
 
       const newFrame: CapturedFrame = {
         id: crypto.randomUUID(),
@@ -595,20 +942,27 @@ export default function App() {
         pageTitle: resolvedTitle,
       };
 
-      if (response.pageTitle && noteTitle === 'Video Notes') {
-        setNoteTitle(response.pageTitle.replace(/ - YouTube$/, ''));
+      if (response.pageTitle && (isProvisionalTitleRef.current || !noteTitleRef.current)) {
+        const cleaned = response.pageTitle.replace(/ - YouTube$/, '').trim();
+        if (cleaned) {
+          setNoteTitle(cleaned);
+          noteTitleRef.current = cleaned;
+        }
       }
-      if (targetUrl) {
+      if (targetUrl && !pageUrlRef.current) {
         setPageUrl(targetUrl);
+        pageUrlRef.current = targetUrl;
       }
 
-      setFrames((prev) => [...prev, newFrame]);
+      const nextFrames = [...framesRef.current, newFrame];
+      framesRef.current = nextFrames;
+      setFrames(nextFrames);
 
       const snippet = `\n### [${response.formattedTime}](${targetUrl}#t=${Math.floor(
         response.timestamp
       )}s)\n![[${fileName}]]\n\n`;
 
-      setMarkdown((prev) => prev + snippet);
+      updateMarkdown((prev) => prev + snippet);
       showStatus(`Captured frame at ${response.formattedTime}`, 'success');
     } catch {
       showStatus('Content script not ready. Refresh the video tab and try again.', 'error');
@@ -633,9 +987,9 @@ export default function App() {
         return;
       }
 
-      const targetUrl = state.pageUrl || pageUrl || tab.url || '';
+      const targetUrl = state.pageUrl || pageUrlRef.current || tab.url || '';
       const snippet = `[${state.formattedTime}](${targetUrl}#t=${Math.floor(state.currentTime)}s) `;
-      setMarkdown((prev) => prev + snippet);
+      updateMarkdown((prev) => prev + snippet);
       showStatus(`Inserted timestamp [${state.formattedTime}]`, 'success');
     } catch {
       showStatus('Unable to reach video player.', 'error');
@@ -657,6 +1011,12 @@ export default function App() {
       // Ignored
     }
   }
+
+  hotkeyHandlersRef.current = {
+    handleCaptureFrame,
+    handleInsertTimestamp,
+    handleTogglePlay,
+  };
 
   async function handleSeek(timestamp: number) {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -694,10 +1054,11 @@ export default function App() {
       )}\n`;
 
       setMarkdown((prev) => {
-        if (prev.includes(imageEmbedToken)) {
-          return prev.replace(imageEmbedToken, `${imageEmbedToken}\n${calloutBlock}`);
-        }
-        return `${prev}\n${calloutBlock}`;
+        const next = prev.includes(imageEmbedToken)
+          ? prev.replace(imageEmbedToken, `${imageEmbedToken}\n${calloutBlock}`)
+          : `${prev}\n${calloutBlock}`;
+        markdownRef.current = next;
+        return next;
       });
 
       showStatus(`Added AI visual explanation for frame ${frame.formattedTime}.`, 'success');
@@ -737,8 +1098,12 @@ export default function App() {
         return;
       }
 
-      if (response.pageTitle && noteTitle === 'Video Notes') {
-        setNoteTitle(response.pageTitle.replace(/ - YouTube$/, ''));
+      if (response.pageTitle && (isProvisionalTitleRef.current || noteTitleRef.current === 'Video Notes')) {
+        const cleaned = response.pageTitle.replace(/ - YouTube$/, '').trim();
+        if (cleaned) {
+          setNoteTitle(cleaned);
+          noteTitleRef.current = cleaned;
+        }
       }
 
       showStatus(`Summarizing ${response.segments.length} segments with Gemini...`, 'info', 0);
@@ -746,12 +1111,12 @@ export default function App() {
       const summaryMarkdown = await summarizeTranscriptToMarkdown({
         apiKey,
         model: selectedModel,
-        pageTitle: response.pageTitle || noteTitle,
-        pageUrl: response.pageUrl || pageUrl || tab.url || '',
+        pageTitle: response.pageTitle || noteTitleRef.current,
+        pageUrl: response.pageUrl || pageUrlRef.current || tab.url || '',
         segments: response.segments,
       });
 
-      setMarkdown((prev) => (prev ? `${prev}\n\n---\n\n${summaryMarkdown}` : summaryMarkdown));
+      updateMarkdown((prev) => (prev ? `${prev}\n\n---\n\n${summaryMarkdown}` : summaryMarkdown));
       showStatus('Transcript study summary added to notes.', 'success');
     } catch (err) {
       showStatus(err instanceof Error ? err.message : 'Summarization failed.', 'error');
@@ -760,156 +1125,201 @@ export default function App() {
     }
   }
 
-  async function performSaveToVault(silent = false) {
-    if (isSavingRef.current) return;
+  function performSaveToVault(silent = false, explicitSnapshot?: SaveSnapshot): Promise<void> {
+    const initialSnapshot = explicitSnapshot ?? captureSaveSnapshot(silent);
+    const initialContextUrl = initialSnapshot.pageUrl.split('#')[0];
 
-    const currentMarkdown = markdownRef.current;
-    const currentTitle = noteTitleRef.current;
-    const currentFrames = framesRef.current;
-    const currentPageUrl = pageUrlRef.current;
+    const runSave = async () => {
+      const snapshot = explicitSnapshot ?? captureSaveSnapshot(silent);
 
-    // Skip silent auto-save if note is clean and has no unsaved changes
-    if (
-      silent &&
-      currentMarkdown === lastSavedMarkdownRef.current &&
-      currentTitle === lastSavedTitleRef.current &&
-      currentFrames.every((f) => savedFrameIdsRef.current.has(f.id))
-    ) {
-      return;
-    }
-
-    // Skip if note is empty
-    if (!currentMarkdown.trim() && currentFrames.length === 0) return;
-
-    let dirHandle: FileSystemDirectoryHandle | null = null;
-    try {
-      dirHandle = await getSavedVaultDirectory();
-    } catch {
-      // Ignore background permission queries
-    }
-
-    if (!dirHandle) {
-      if (!silent) {
-        try {
-          dirHandle = await reauthorizeVault();
-          if (dirHandle) {
-            setVaultName(dirHandle.name);
-            setVaultPermissionNeeded(false);
-          }
-        } catch (err) {
-          showStatus(err instanceof Error ? err.message : 'Folder selection canceled.', 'error');
-          return;
-        }
-      } else {
-        setVaultPermissionNeeded(true);
+      // If an implicit save waited behind an earlier save and context already switched away, skip it
+      if (!explicitSnapshot && snapshot.pageUrl.split('#')[0] !== initialContextUrl) {
         return;
       }
-    }
 
-    if (!dirHandle) return;
-    setVaultPermissionNeeded(false);
+      const {
+        markdown: currentMarkdown,
+        title: currentTitle,
+        frames: currentFrames,
+        pageUrl: currentPageUrl,
+        existingFileName: currentExistingFileName,
+        baseContent: snapshotBaseContent,
+        lastSavedMarkdown: snapshotLastSavedMarkdown,
+        lastSavedTitle: snapshotLastSavedTitle,
+        silent: isSilent,
+      } = snapshot;
+      const saveContextUrl = currentPageUrl.split('#')[0];
 
-    isSavingRef.current = true;
-    setIsSaving(true);
-    if (!silent) {
-      showStatus('Saving to Obsidian vault...', 'info', 0);
-    }
-
-    try {
-      // 1. Only write new frames that haven't been saved to disk yet
-      for (const frame of currentFrames) {
-        if (!savedFrameIdsRef.current.has(frame.id)) {
-          await saveBinaryAttachment(dirHandle, frame.fileName, frame.dataUrl);
-          savedFrameIdsRef.current.add(frame.id);
-        }
+      // Skip silent auto-save if note is clean and has no unsaved changes
+      if (
+        isSilent &&
+        currentMarkdown === snapshotLastSavedMarkdown &&
+        currentTitle === snapshotLastSavedTitle &&
+        currentFrames.every((f) => savedFrameIdsRef.current.has(f.id))
+      ) {
+        return;
       }
 
-      // 2. Format content with frontmatter if not already present
-      const fullContent = currentMarkdown.startsWith('---')
-        ? currentMarkdown
-        : generateObsidianFrontmatter({
-            title: currentTitle,
-            sourceUrl: currentPageUrl,
-            tags: ['video-notes', 'study'],
-          }) + currentMarkdown;
+      // Skip if note is empty
+      if (!currentMarkdown.trim() && currentFrames.length === 0) return;
 
-      // Determine target file name: prioritize matched existingVaultFileName to avoid duplicating
-      const targetFileName = existingVaultFileName
-        ? existingVaultFileName.replace(/\.md$/, '')
-        : currentTitle;
-
-      // 3. Write markdown file to Obsidian vault with optimistic concurrency control
-      const saveResult = await saveMarkdownFileNonDestructive(
-        dirHandle,
-        targetFileName,
-        fullContent,
-        {
-          allowOverwrite: false,
-          baseContent: lastKnownDiskContentRef.current,
-        }
-      );
-
-      setExistingVaultMarkdown(saveResult.finalContent);
-      setExistingVaultFileName(`${targetFileName}.md`);
-      lastKnownDiskContentRef.current = saveResult.finalContent;
-      lastKnownFileModifiedRef.current = saveResult.lastModified;
-
-      if (saveResult.wasMerged) {
-        setMarkdown(saveResult.finalContent);
-        markdownRef.current = saveResult.finalContent;
-        lastSavedMarkdownRef.current = saveResult.finalContent;
-      } else {
-        lastSavedMarkdownRef.current = saveResult.finalContent;
+      let dirHandle: FileSystemDirectoryHandle | null = null;
+      try {
+        dirHandle = await getSavedVaultDirectory(!isSilent);
+      } catch {
+        // Ignore background permission queries
       }
 
-      lastSavedTitleRef.current = currentTitle;
-      setLastSavedTime(new Date());
-      setVaultPermissionNeeded(false);
-      setHasUnsavedChanges(false);
-
-      // Persist active session snapshot to chrome.storage.local for instant reload on extension refresh
-      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        const cleanKey = 'session_' + (currentPageUrl.split('#')[0] || currentTitle);
-        chrome.storage.local.set({
-          [cleanKey]: {
-            markdown: saveResult.finalContent,
-            title: currentTitle,
-            url: currentPageUrl,
-            updatedAt: saveResult.lastModified || Date.now(),
-          },
-        });
-      }
-
-      if (!silent) {
-        showStatus(
-          saveResult.wasMerged
-            ? `Safely merged with existing Obsidian note (zero data loss).`
-            : `Saved "${targetFileName}.md" and ${currentFrames.length} images to ${dirHandle.name}.`,
-          'success'
-        );
-      }
-    } catch (err) {
-      if (!silent) {
-        showStatus(err instanceof Error ? err.message : 'Failed to save to local folder.', 'error');
-      } else {
-        console.warn('Auto-save encountered error:', err);
-        const errStr = String(err);
-        if (errStr.includes('permission') || errStr.includes('NotAllowedError') || errStr.includes('SecurityError')) {
+      if (!dirHandle) {
+        if (!isSilent) {
+          try {
+            dirHandle = await reauthorizeVault();
+            if (dirHandle) {
+              setVaultName(dirHandle.name);
+              setVaultPermissionNeeded(false);
+            }
+          } catch (err) {
+            showStatus(err instanceof Error ? err.message : 'Folder selection canceled.', 'error');
+            return;
+          }
+        } else {
           setVaultPermissionNeeded(true);
+          // Continuously mirror to chrome.storage.local so zero edits are lost
+          if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+            const cleanKey = 'session_' + (saveContextUrl || currentTitle);
+            chrome.storage.local.set({
+              [cleanKey]: {
+                markdown: currentMarkdown,
+                title: currentTitle,
+                url: currentPageUrl,
+                updatedAt: Date.now(),
+              },
+            }).catch(() => {});
+          }
+          return;
         }
       }
-    } finally {
-      isSavingRef.current = false;
-      setIsSaving(false);
-    }
+
+      if (!dirHandle) return;
+      if (pageUrlRef.current.split('#')[0] === saveContextUrl) {
+        setVaultPermissionNeeded(false);
+      }
+
+      isSavingRef.current = true;
+      setIsSaving(true);
+      if (!isSilent) {
+        showStatus('Saving to Obsidian vault...', 'info', 0);
+      }
+
+      try {
+        // 1. Only write new frames that haven't been saved to disk yet
+        for (const frame of currentFrames) {
+          if (!savedFrameIdsRef.current.has(frame.id)) {
+            await saveBinaryAttachment(dirHandle, frame.fileName, frame.dataUrl);
+            savedFrameIdsRef.current.add(frame.id);
+          }
+        }
+
+        // 2. Format content with frontmatter if not already present
+        const fullContent = currentMarkdown.startsWith('---')
+          ? currentMarkdown
+          : generateObsidianFrontmatter({
+              title: currentTitle,
+              sourceUrl: currentPageUrl,
+              tags: ['video-notes', 'study'],
+            }) + currentMarkdown;
+
+        // Determine target file name from synchronized snapshot: avoid duplicating matched notes
+        const targetFileName = currentExistingFileName
+          ? currentExistingFileName.replace(/\.md$/, '')
+          : currentTitle;
+
+        const resolvedBaseContent = lastSavedDiskByUrlRef.current.get(saveContextUrl) ?? snapshotBaseContent;
+
+        // 3. Write markdown file to Obsidian vault with optimistic concurrency control
+        const saveResult = await saveMarkdownFileNonDestructive(
+          dirHandle,
+          targetFileName,
+          fullContent,
+          {
+            allowOverwrite: false,
+            baseContent: resolvedBaseContent,
+          }
+        );
+
+        lastSavedDiskByUrlRef.current.set(saveContextUrl, saveResult.finalContent);
+
+        // Persist session snapshot for this note's URL even if panel switched mid-save
+        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+          const cleanKey = 'session_' + (saveContextUrl || currentTitle);
+          chrome.storage.local.set({
+            [cleanKey]: {
+              markdown: saveResult.finalContent,
+              title: currentTitle,
+              url: currentPageUrl,
+              updatedAt: saveResult.lastModified || Date.now(),
+            },
+          });
+        }
+
+        const isStillSameContext = pageUrlRef.current.split('#')[0] === saveContextUrl;
+        if (isStillSameContext) {
+          setExistingVaultMarkdown(saveResult.finalContent);
+          setExistingVaultFileName(`${targetFileName}.md`);
+          existingVaultFileNameRef.current = `${targetFileName}.md`;
+          lastKnownDiskContentRef.current = saveResult.finalContent;
+          lastKnownFileModifiedRef.current = saveResult.lastModified;
+
+          if (saveResult.wasMerged) {
+            updateMarkdown(saveResult.finalContent);
+            lastSavedMarkdownRef.current = saveResult.finalContent;
+          } else {
+            lastSavedMarkdownRef.current = saveResult.finalContent;
+          }
+
+          lastSavedTitleRef.current = currentTitle;
+          setLastSavedTime(new Date());
+          setVaultPermissionNeeded(false);
+          setHasUnsavedChanges(false);
+
+          if (!isSilent) {
+            showStatus(
+              saveResult.wasMerged
+                ? `Safely merged with existing Obsidian note (zero data loss).`
+                : `Saved "${targetFileName}.md" and ${currentFrames.length} images to ${dirHandle.name}.`,
+              'success'
+            );
+          }
+        }
+      } catch (err) {
+        if (!isSilent) {
+          showStatus(err instanceof Error ? err.message : 'Failed to save to local folder.', 'error');
+        } else {
+          console.warn('Auto-save encountered error:', err);
+          const errStr = String(err);
+          if (errStr.includes('permission') || errStr.includes('NotAllowedError') || errStr.includes('SecurityError')) {
+            setVaultPermissionNeeded(true);
+          }
+        }
+      } finally {
+        isSavingRef.current = false;
+        setIsSaving(false);
+      }
+    };
+
+    const nextPromise = saveQueueRef.current.then(runSave, runSave);
+    saveQueueRef.current = nextPromise;
+    return nextPromise;
   }
 
   // Detect unsaved changes
   useEffect(() => {
+    const hasContent = Boolean(markdown.trim() || frames.length > 0);
     const isDirty =
-      markdown !== lastSavedMarkdownRef.current ||
-      noteTitle !== lastSavedTitleRef.current ||
-      frames.some((f) => !savedFrameIdsRef.current.has(f.id));
+      hasContent &&
+      (markdown !== lastSavedMarkdownRef.current ||
+        noteTitle !== lastSavedTitleRef.current ||
+        frames.some((f) => !savedFrameIdsRef.current.has(f.id)));
     setHasUnsavedChanges(isDirty);
   }, [markdown, noteTitle, frames]);
 
@@ -951,18 +1361,44 @@ export default function App() {
   }, [autoSaveEnabled, vaultName]);
 
   function handleDeleteFrame(frameId: string) {
-    setFrames((prev) => prev.filter((f) => f.id !== frameId));
+    const nextFrames = framesRef.current.filter((f) => f.id !== frameId);
+    framesRef.current = nextFrames;
+    setFrames(nextFrames);
     showStatus('Frame removed.', 'info', 2000);
   }
 
   function handleApplyTemplate() {
     const templateContent = generateTemplate({
       type: selectedTemplate,
-      title: noteTitle,
-      sourceUrl: pageUrl,
+      title: noteTitleRef.current,
+      sourceUrl: pageUrlRef.current,
     });
-    setMarkdown((prev) => (prev.trim() ? `${templateContent}\n${prev}` : templateContent));
+    updateMarkdown((prev) => (prev.trim() ? `${templateContent}\n${prev}` : templateContent));
     showStatus(`Applied ${selectedTemplate} template to notes.`, 'success');
+  }
+
+  function handleOpenInObsidian() {
+    if (!vaultName) {
+      showStatus('Select an Obsidian vault first.', 'info');
+      handleConnectVault();
+      return;
+    }
+    const fileName = existingVaultFileName || `${noteTitle}.md`;
+    openNoteInObsidian(vaultName, fileName);
+    showStatus(`Opening "${fileName}" in Obsidian...`, 'info', 2500);
+  }
+
+  function handleExportMarkdown() {
+    const fileName = existingVaultFileName || `${noteTitle}.md`;
+    const fullContent = markdownRef.current.startsWith('---')
+      ? markdownRef.current
+      : generateObsidianFrontmatter({
+          title: noteTitleRef.current,
+          sourceUrl: pageUrlRef.current,
+          tags: ['video-notes', 'study'],
+        }) + markdownRef.current;
+    downloadMarkdownFile(fileName, fullContent);
+    showStatus(`Exported "${fileName}" to downloads.`, 'success', 2500);
   }
 
   return (
@@ -982,7 +1418,11 @@ export default function App() {
           type="text"
           className="input-field"
           value={noteTitle}
-          onChange={(e) => setNoteTitle(e.target.value)}
+          onChange={(e) => {
+            isProvisionalTitleRef.current = false;
+            setNoteTitle(e.target.value);
+            noteTitleRef.current = e.target.value;
+          }}
           placeholder="Note Title"
           style={{
             fontWeight: 600,
@@ -1026,7 +1466,7 @@ export default function App() {
               ) : hasUnsavedChanges ? (
                 <span
                   style={{ color: '#fbbf24', display: 'flex', alignItems: 'center', gap: '3px' }}
-                  title="Unsaved changes (will auto-save in 15s or on pause)"
+                  title="Unsaved changes (auto-saves 2.5s after edits & 15s heartbeat)"
                 >
                   <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#fbbf24', display: 'inline-block' }} />
                   <span>Unsaved</span>
@@ -1043,9 +1483,14 @@ export default function App() {
             </div>
           )}
 
-          <span className={`badge ${vaultName ? 'badge-connected' : 'badge-disconnected'}`}>
-            {vaultName ? `📁 ${vaultName}` : 'No Vault'}
-          </span>
+          <button
+            className={`badge ${vaultName ? 'badge-connected' : 'badge-disconnected'}`}
+            onClick={vaultName ? () => setIsSettingsOpen(true) : handleConnectVault}
+            style={{ cursor: 'pointer', border: 'none' }}
+            title={vaultName ? `📁 Vault: ${vaultName} (Click to configure)` : 'Click to connect Obsidian Vault'}
+          >
+            {vaultName ? `📁 ${vaultName}` : '📁 Connect Vault'}
+          </button>
         </div>
       </div>
 
@@ -1058,6 +1503,8 @@ export default function App() {
         onSaveToVault={() => performSaveToVault(false)}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenReview={() => setIsReviewOpen(true)}
+        onOpenInObsidian={handleOpenInObsidian}
+        onExportMarkdown={handleExportMarkdown}
         timestampsCount={timestamps.length}
         isPreviewMode={isPreviewMode}
         onTogglePreview={() => setIsPreviewMode(!isPreviewMode)}
@@ -1065,6 +1512,7 @@ export default function App() {
         isSummarizing={isSummarizing}
         isSaving={isSaving}
         hasUnsavedChanges={hasUnsavedChanges}
+        vaultName={vaultName}
       />
 
       {/* Timestamps & Resume Strip */}
@@ -1210,17 +1658,17 @@ export default function App() {
 
       {/* Main Tab Content Area */}
       <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {activeTab === 'editor' && (
+        <div style={{ display: activeTab === 'editor' ? 'flex' : 'none', flex: 1, flexDirection: 'column', height: '100%' }}>
           <Editor
             markdown={markdown}
-            onChange={setMarkdown}
+            onChange={updateMarkdown}
             isPreviewMode={isPreviewMode}
             onSeek={handleSeek}
             framesMap={framesMap}
           />
-        )}
+        </div>
 
-        {activeTab === 'gallery' && (
+        <div style={{ display: activeTab === 'gallery' ? 'flex' : 'none', flex: 1, flexDirection: 'column', height: '100%' }}>
           <FrameGallery
             frames={frames}
             onSeek={handleSeek}
@@ -1228,13 +1676,16 @@ export default function App() {
             onDeleteFrame={handleDeleteFrame}
             analyzingFrameId={analyzingFrameId}
           />
-        )}
+        </div>
 
-        {activeTab === 'captions' && (
+        <div style={{ display: activeTab === 'captions' ? 'flex' : 'none', flex: 1, flexDirection: 'column', height: '100%' }}>
           <LiveCaptionsTab
             onInsertIntoNotes={(text) => {
-              setMarkdown((prev) => (prev ? `${prev}${text}` : text.trimStart()));
+              updateMarkdown((prev) => (prev ? `${prev}${text}` : text.trimStart()));
               showStatus('Appended live transcript to notes.', 'success', 2000);
+            }}
+            onRegisterFlush={(flushFn) => {
+              flushCaptionsRef.current = flushFn;
             }}
             onSeek={handleSeek}
             pageUrl={pageUrl}
@@ -1259,11 +1710,11 @@ export default function App() {
                 const summaryMarkdown = await summarizeTranscriptToMarkdown({
                   apiKey,
                   model: selectedModel,
-                  pageTitle: noteTitle,
-                  pageUrl,
+                  pageTitle: noteTitleRef.current,
+                  pageUrl: pageUrlRef.current,
                   segments,
                 });
-                setMarkdown((prev) => (prev ? `${prev}\n\n---\n\n${summaryMarkdown}` : summaryMarkdown));
+                updateMarkdown((prev) => (prev ? `${prev}\n\n---\n\n${summaryMarkdown}` : summaryMarkdown));
                 showStatus('Live transcript summary added to notes.', 'success');
                 setActiveTab('editor');
               } catch (err) {
@@ -1272,9 +1723,9 @@ export default function App() {
             }}
             onOpenSettings={() => setIsSettingsOpen(true)}
           />
-        )}
+        </div>
 
-        {activeTab === 'chat' && (
+        <div style={{ display: activeTab === 'chat' ? 'flex' : 'none', flex: 1, flexDirection: 'column', height: '100%' }}>
           <AIAssistant
             apiKey={apiKey}
             model={selectedModel}
@@ -1282,10 +1733,10 @@ export default function App() {
             pageUrl={pageUrl}
             markdown={markdown}
             frames={frames}
-            onInsertIntoNotes={(text) => setMarkdown((prev) => prev + text)}
+            onInsertIntoNotes={(text) => updateMarkdown((prev) => prev + text)}
             onOpenSettings={() => setIsSettingsOpen(true)}
           />
-        )}
+        </div>
       </div>
 
       {/* Persistent Status Toast Bar */}
@@ -1357,7 +1808,7 @@ export default function App() {
           onSeek={handleSeek}
           onLoadFromVault={() => checkAndLoadExistingNote(noteTitle, pageUrl, true)}
           onMergeWithVault={() => performSaveToVault(false)}
-          onInsertSnippet={(text) => setMarkdown((prev) => prev + text)}
+          onInsertSnippet={(text) => updateMarkdown((prev) => prev + text)}
           onClose={() => setIsReviewOpen(false)}
         />
       )}

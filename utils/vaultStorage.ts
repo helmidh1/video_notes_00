@@ -47,7 +47,67 @@ export async function reauthorizeVault(): Promise<FileSystemDirectoryHandle | nu
   return await selectVaultDirectory();
 }
 
-export async function getSavedVaultDirectory(): Promise<FileSystemDirectoryHandle | null> {
+export type VaultPermissionState = 'granted' | 'prompt' | 'denied' | 'none';
+
+export async function checkVaultPermissionStatus(): Promise<VaultPermissionState> {
+  if (cachedVaultHandle) {
+    try {
+      const handleWithPerms = cachedVaultHandle as unknown as {
+        queryPermission?: (descriptor: { mode: 'read' | 'readwrite' }) => Promise<PermissionState>;
+      };
+      if (typeof handleWithPerms.queryPermission === 'function') {
+        const permission = await handleWithPerms.queryPermission({ mode: 'readwrite' });
+        return permission;
+      }
+      return 'granted';
+    } catch {
+      // Fall through to stored handle
+    }
+  }
+
+  let handle: FileSystemDirectoryHandle | null = null;
+  try {
+    handle = (await get<FileSystemDirectoryHandle>(VAULT_HANDLE_KEY)) ?? null;
+  } catch {
+    return 'none';
+  }
+  if (!handle) return 'none';
+
+  try {
+    const handleWithPerms = handle as unknown as {
+      queryPermission: (descriptor: { mode: 'read' | 'readwrite' }) => Promise<PermissionState>;
+    };
+    return await handleWithPerms.queryPermission({ mode: 'readwrite' });
+  } catch {
+    return 'prompt';
+  }
+}
+
+export function openNoteInObsidian(vaultName: string, fileName: string): void {
+  const cleanName = fileName.replace(/\.md$/, '');
+  const uri = `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(cleanName)}`;
+  if (typeof window !== 'undefined') {
+    window.open(uri, '_blank');
+  }
+}
+
+export function downloadMarkdownFile(fileName: string, content: string): void {
+  const safeName =
+    fileName.replace(/[\r\n\t]/g, ' ').replace(/[<>:"/\\|?*]+/g, '-').replace(/\.md$/, '').trim() ||
+    'Video-Note';
+  if (typeof document === 'undefined') return;
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${safeName}.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export async function getSavedVaultDirectory(interactive = false): Promise<FileSystemDirectoryHandle | null> {
   // 1. First priority: in-memory live handle from showDirectoryPicker
   if (cachedVaultHandle) {
     try {
@@ -88,10 +148,11 @@ export async function getSavedVaultDirectory(): Promise<FileSystemDirectoryHandl
       return handle;
     }
 
-    // Only attempt requestPermission if there is an active user gesture
+    // Attempt requestPermission if interactive or active user gesture
     const hasUserActivation =
-      typeof navigator !== 'undefined' &&
-      Boolean((navigator as unknown as { userActivation?: { isActive: boolean } }).userActivation?.isActive);
+      interactive ||
+      (typeof navigator !== 'undefined' &&
+        Boolean((navigator as unknown as { userActivation?: { isActive: boolean } }).userActivation?.isActive));
 
     if (hasUserActivation) {
       const requested = await handleWithPerms.requestPermission({ mode: 'readwrite' });

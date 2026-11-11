@@ -55,6 +55,32 @@ body {
   background: var(--text-subtle);
 }
 
+/* Scrollable Toolbar */
+.scrollable-toolbar {
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.scrollable-toolbar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.scrollable-toolbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollable-toolbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+.scrollable-toolbar::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-primary);
+}
+
 /* Glassmorphic Container */
 .glass-panel {
   background: var(--bg-glass);
