@@ -220,6 +220,12 @@ export default defineContentScript({
         }
 
         if (message.type === 'START_LIVE_CAPTIONS') {
+          liveCaptionsEnabledBySidePanel = true;
+          autoEnableCCPreference = message.autoEnableCC !== false;
+          if (!autoEnableCCPreference && ccRetryTimer !== null) {
+            clearTimeout(ccRetryTimer);
+            ccRetryTimer = null;
+          }
           startLiveCaptionObserver();
           sendResponse({ ok: true });
           return true;
@@ -247,16 +253,27 @@ export default defineContentScript({
 
     window.addEventListener('yt-navigate-finish', () => {
       lastTrackedVideo = null;
+      lastObservedDomCaption = '';
+      lastObservedCueKey = '';
       attachVideoTracking();
+      if (liveCaptionsEnabledBySidePanel) {
+        startLiveCaptionObserver();
+      }
     });
     window.addEventListener('popstate', () => {
       lastTrackedVideo = null;
+      lastObservedDomCaption = '';
+      lastObservedCueKey = '';
       attachVideoTracking();
+      if (liveCaptionsEnabledBySidePanel) {
+        startLiveCaptionObserver();
+      }
     });
   },
 });
 
 let lastTrackedVideo: HTMLVideoElement | null = null;
+const trackedPlaybackVideos = new WeakSet<HTMLVideoElement>();
 let lastBroadcastTime = -1;
 
 function saveAndBroadcastVideoProgress(video: HTMLVideoElement, force = false) {
@@ -298,18 +315,34 @@ function attachVideoTracking() {
   if (!video || video === lastTrackedVideo) return;
   lastTrackedVideo = video;
 
-  video.addEventListener('seeked', () => saveAndBroadcastVideoProgress(video, true));
-  video.addEventListener('pause', () => saveAndBroadcastVideoProgress(video, true));
-  video.addEventListener('play', () => saveAndBroadcastVideoProgress(video, true));
-  video.addEventListener('timeupdate', () => saveAndBroadcastVideoProgress(video, false));
+  if (!trackedPlaybackVideos.has(video)) {
+    trackedPlaybackVideos.add(video);
+    video.addEventListener('seeked', () => saveAndBroadcastVideoProgress(video, true));
+    video.addEventListener('pause', () => saveAndBroadcastVideoProgress(video, true));
+    video.addEventListener('play', () => saveAndBroadcastVideoProgress(video, true));
+    video.addEventListener('timeupdate', () => saveAndBroadcastVideoProgress(video, false));
+  }
 
   // Initial broadcast
   saveAndBroadcastVideoProgress(video, true);
+
+  // Only attach/re-attach live caption observation if the side panel enabled it
+  if (liveCaptionsEnabledBySidePanel) {
+    startLiveCaptionObserver();
+  }
 }
 
+let liveCaptionsEnabledBySidePanel = false;
+let autoEnableCCPreference = true;
 let captionObserver: MutationObserver | null = null;
-let lastObservedCaption = '';
+let lastCaptionVideo: HTMLVideoElement | null = null;
+let lastObservedDomCaption = '';
+let lastObservedCueKey = '';
 let activeCueListeners: Array<{ track: TextTrack; listener: () => void }> = [];
+let activeTrackListListeners: Array<{ list: TextTrackList; type: 'addtrack' | 'change'; listener: EventListener }> = [];
+const autoEnabledYouTubeUrls = new Set<string>();
+const retriedYouTubeCCUrls = new Set<string>();
+let ccRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 const CAPTION_SELECTOR = [
   // YouTube
@@ -318,7 +351,6 @@ const CAPTION_SELECTOR = [
   // Canvas LMS & Video.js captions
   '.vjs-text-track-display',
   '.vjs-text-track-cue',
-  '.vjs-text-track-cue div',
   '[class*="vjs-text-track"]',
   // Canvas Studio / Instructure Media
   '[class*="studio-caption"]',
@@ -335,86 +367,267 @@ const CAPTION_SELECTOR = [
   'span[class*="caption-text"]',
 ].join(', ');
 
-function startLiveCaptionObserver() {
-  if (captionObserver) return;
+function getCleanVideoUrlKey(): string {
+  try {
+    const u = new URL(window.location.href);
+    u.hash = '';
+    u.searchParams.delete('t');
+    return u.toString();
+  } catch {
+    return window.location.href.split('#')[0].replace(/[?&]t=\d+s?/, '');
+  }
+}
 
-  lastObservedCaption = '';
-  captionObserver = new MutationObserver(() => {
-    const elements = Array.from(document.querySelectorAll<HTMLElement>(CAPTION_SELECTOR));
-    if (elements.length > 0) {
-      let fullText = '';
-      const specificCues = elements.filter((el) =>
-        el.matches('.vjs-text-track-cue, .vjs-text-track-cue div, .ytp-caption-segment, [class*="cue"]')
-      );
-      if (specificCues.length > 0) {
-        fullText = specificCues.map((s) => s.textContent || '').join(' ').trim();
-      } else {
-        fullText = elements.map((s) => s.textContent || '').join(' ').trim();
+function autoEnableYouTubeSubtitles() {
+  if (!window.location.hostname.includes('youtube.com')) return;
+  if (!liveCaptionsEnabledBySidePanel || !autoEnableCCPreference) return;
+
+  const urlKey = getCleanVideoUrlKey();
+  if (autoEnabledYouTubeUrls.has(urlKey)) return;
+
+  try {
+    const ccBtn = document.querySelector<HTMLButtonElement>('.ytp-subtitles-button');
+    if (!ccBtn) {
+      if (!retriedYouTubeCCUrls.has(urlKey) && ccRetryTimer === null) {
+        retriedYouTubeCCUrls.add(urlKey);
+        ccRetryTimer = setTimeout(() => {
+          ccRetryTimer = null;
+          if (!liveCaptionsEnabledBySidePanel || !autoEnableCCPreference) return;
+          if (getCleanVideoUrlKey() !== urlKey) return;
+          const retryBtn = document.querySelector<HTMLButtonElement>('.ytp-subtitles-button');
+          autoEnabledYouTubeUrls.add(urlKey);
+          if (
+            retryBtn &&
+            !retryBtn.disabled &&
+            retryBtn.getAttribute('aria-disabled') !== 'true' &&
+            retryBtn.getAttribute('aria-pressed') !== 'true'
+          ) {
+            retryBtn.click();
+          }
+        }, 750);
       }
+      return;
+    }
 
-      fullText = fullText.replace(/\s+/g, ' ').trim();
+    if (ccRetryTimer !== null) {
+      clearTimeout(ccRetryTimer);
+      ccRetryTimer = null;
+    }
+    autoEnabledYouTubeUrls.add(urlKey);
 
-      if (fullText && fullText !== lastObservedCaption) {
-        lastObservedCaption = fullText;
-        const video = getActiveVideo();
-        const time = video ? video.currentTime : 0;
+    if (ccBtn.disabled || ccBtn.getAttribute('aria-disabled') === 'true') {
+      return;
+    }
+    if (ccBtn.getAttribute('aria-pressed') !== 'true') {
+      ccBtn.click();
+    }
+  } catch {
+    // Ignore DOM interaction errors
+  }
+}
+
+function selectPreferredCaptionTrack(tracks: TextTrackList): TextTrack | null {
+  const candidates: TextTrack[] = [];
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i];
+    if (t.kind === 'captions' || t.kind === 'subtitles') {
+      candidates.push(t);
+    }
+  }
+  if (candidates.length === 0) return null;
+
+  const showing = candidates.find((t) => t.mode === 'showing');
+  if (showing) return showing;
+
+  const browserLang = (navigator.language || 'en').toLowerCase();
+  const baseLang = browserLang.split('-')[0];
+
+  const exactLang = candidates.find((t) => t.language && t.language.toLowerCase() === browserLang);
+  if (exactLang) return exactLang;
+
+  const baseLangMatch = candidates.find(
+    (t) => t.language && t.language.toLowerCase().split('-')[0] === baseLang
+  );
+  if (baseLangMatch) return baseLangMatch;
+
+  const hidden = candidates.find((t) => t.mode === 'hidden');
+  if (hidden) return hidden;
+
+  return candidates.find((t) => t.kind === 'captions') || candidates[0];
+}
+
+function clearCueListeners() {
+  for (const { track, listener } of activeCueListeners) {
+    track.removeEventListener('cuechange', listener);
+  }
+  activeCueListeners = [];
+}
+
+function clearTrackListListeners() {
+  for (const { list, type, listener } of activeTrackListListeners) {
+    list.removeEventListener(type, listener);
+  }
+  activeTrackListListeners = [];
+}
+
+function hookTextTrack(track: TextTrack, video?: HTMLVideoElement) {
+  if (track.mode === 'disabled') {
+    try {
+      track.mode = 'hidden';
+    } catch {
+      // Ignored
+    }
+  }
+  const listener = () => {
+    if (track.activeCues && track.activeCues.length > 0) {
+      const parts: string[] = [];
+      for (let i = 0; i < track.activeCues.length; i++) {
+        const cue = track.activeCues[i] as VTTCue;
+        const cleaned = (cue.text || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+        if (cleaned) parts.push(cleaned);
+      }
+      const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+      const firstCue = track.activeCues[0] as VTTCue;
+      const time =
+        typeof firstCue?.startTime === 'number' && !isNaN(firstCue.startTime)
+          ? firstCue.startTime
+          : (video ? video.currentTime : 0);
+      const cueKey = `${Math.round(time * 100)}:${text}`;
+
+      if (text && cueKey !== lastObservedCueKey) {
+        lastObservedCueKey = cueKey;
         chrome.runtime.sendMessage({
           type: 'LIVE_WEB_CAPTION',
-          text: fullText,
+          text,
           timestamp: time,
           formattedTime: formatSeconds(time),
         }).catch(() => {});
       }
+    } else {
+      lastObservedCueKey = '';
     }
-  });
+  };
+  track.addEventListener('cuechange', listener);
+  activeCueListeners.push({ track, listener });
+}
 
-  captionObserver.observe(document.body, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-  });
+function syncBestTextTrack(video: HTMLVideoElement) {
+  if (!video || !video.textTracks) return;
+  const bestTrack = selectPreferredCaptionTrack(video.textTracks);
+  if (!bestTrack) {
+    clearCueListeners();
+    return;
+  }
 
-  function hookTextTrack(track: TextTrack, video?: HTMLVideoElement) {
-    const listener = () => {
-      if (track.activeCues && track.activeCues.length > 0) {
-        const cue = track.activeCues[0] as VTTCue;
-        const text = (cue.text || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-        if (text && text !== lastObservedCaption) {
-          lastObservedCaption = text;
-          const time = cue.startTime || (video ? video.currentTime : 0);
+  if (activeCueListeners.length === 1 && activeCueListeners[0].track === bestTrack) {
+    if (bestTrack.mode === 'disabled') {
+      try {
+        bestTrack.mode = 'hidden';
+      } catch {
+        // Ignored
+      }
+    }
+    return;
+  }
+
+  clearCueListeners();
+  hookTextTrack(bestTrack, video);
+}
+
+function attachTextTracksForVideo(video: HTMLVideoElement | undefined) {
+  if (!video || !video.textTracks) return;
+
+  if (video !== lastCaptionVideo) {
+    clearCueListeners();
+    clearTrackListListeners();
+    lastCaptionVideo = video;
+    lastObservedCueKey = '';
+
+    const onTrackChange = () => {
+      if (liveCaptionsEnabledBySidePanel) {
+        syncBestTextTrack(video);
+      }
+    };
+    video.textTracks.addEventListener('addtrack', onTrackChange);
+    video.textTracks.addEventListener('change', onTrackChange);
+    activeTrackListListeners.push(
+      { list: video.textTracks, type: 'addtrack', listener: onTrackChange },
+      { list: video.textTracks, type: 'change', listener: onTrackChange }
+    );
+  }
+
+  syncBestTextTrack(video);
+}
+
+function startLiveCaptionObserver() {
+  // Always ensure YouTube CC (at most once per URL when autoEnableCC !== false) and video TextTrack hooks are synced
+  autoEnableYouTubeSubtitles();
+  attachTextTracksForVideo(getActiveVideo());
+
+  if (captionObserver) return;
+
+  lastObservedDomCaption = '';
+  captionObserver = new MutationObserver(() => {
+    const elements = Array.from(document.querySelectorAll<HTMLElement>(CAPTION_SELECTOR));
+    if (elements.length > 0) {
+      const specificCues = elements.filter((el) =>
+        el.matches('.vjs-text-track-cue, .ytp-caption-segment, [class*="cue"]')
+      );
+      const candidates = specificCues.length > 0 ? specificCues : elements;
+      // Keep only deepest/leaf matched nodes to avoid parent+child double scraping
+      const leafElements = candidates.filter(
+        (el) => !candidates.some((other) => other !== el && el.contains(other))
+      );
+
+      const fullText = leafElements
+        .map((s) => s.textContent || '')
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (fullText) {
+        if (fullText !== lastObservedDomCaption) {
+          lastObservedDomCaption = fullText;
+          const video = getActiveVideo();
+          const time = video ? video.currentTime : 0;
           chrome.runtime.sendMessage({
             type: 'LIVE_WEB_CAPTION',
-            text,
+            text: fullText,
             timestamp: time,
             formattedTime: formatSeconds(time),
           }).catch(() => {});
         }
+      } else {
+        lastObservedDomCaption = '';
       }
-    };
-    track.addEventListener('cuechange', listener);
-    activeCueListeners.push({ track, listener });
-  }
-
-  const video = getActiveVideo();
-  if (video && video.textTracks) {
-    for (let i = 0; i < video.textTracks.length; i++) {
-      hookTextTrack(video.textTracks[i], video);
+    } else {
+      lastObservedDomCaption = '';
     }
-    // Hook dynamically added tracks (Canvas loads tracks dynamically via network WebVTT)
-    video.textTracks.addEventListener('addtrack', (e: TrackEvent) => {
-      if (e.track) hookTextTrack(e.track as TextTrack, video);
+  });
+
+  if (document.body) {
+    captionObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
     });
   }
 }
 
 function stopLiveCaptionObserver() {
+  liveCaptionsEnabledBySidePanel = false;
+  if (ccRetryTimer !== null) {
+    clearTimeout(ccRetryTimer);
+    ccRetryTimer = null;
+  }
   if (captionObserver) {
     captionObserver.disconnect();
     captionObserver = null;
   }
-  for (const { track, listener } of activeCueListeners) {
-    track.removeEventListener('cuechange', listener);
-  }
-  activeCueListeners = [];
+  clearCueListeners();
+  clearTrackListListeners();
+  lastCaptionVideo = null;
+  lastObservedDomCaption = '';
+  lastObservedCueKey = '';
 }
 

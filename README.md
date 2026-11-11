@@ -18,10 +18,11 @@
 - ⏱️ **Interactive Timestamps & Real-Time Sync**: Click any timestamp in your notes (`[04:21]`) to instantly seek the video to that exact second. Actively tracks video playhead across seeks, pauses, and page navigation with thumbnail-filtering heuristics.
 - 🎯 **Accurate "Resume at [MM:SS]"**: Remembers where you stopped watching across sessions and browser refreshes (`chrome.storage.local`). Intelligently distinguishes between current playhead, saved watch progress, and the latest written note timestamp while isolating frontmatter dates.
 - 📸 **Timestamped Visual Snapshots**: Grab high-resolution slides, diagrams, and code snippets with `Alt+S` or 1-click. Saved automatically to your vault's attachments folder.
-- 🎙️ **Real-Time Chrome Live Captions**: Stream live on-device speech-to-text directly from **Chrome Live Caption** (`chrome://settings/accessibility`) into your notes with synchronized timestamps. Features intelligent delta-deduplication so only fresh sentences are captured.
+- 🎙️ **Standalone In-Browser Captions & Live Dictation**: Streams live subtitles from **YouTube** (with automatic CC activation), **Coursera**, **Udemy**, and **Canvas LMS** directly into your notes without needing any external server or terminal script. Includes browser-native **Live Voice Dictation** powered by the Web Speech API for hands-free speech-to-text.
 - 🎓 **Canvas LMS & Video.js Support**: Deep integration with Canvas LMS course pages, Canvas Studio embeds, and Video.js players across nested iframes with accurate time sync and closed-caption scraping.
 - 📝 **Dual Edit & Live Preview Editor**: Split-mode Markdown editor with live image rendering, clickable timestamp anchors, and note templates (Cornell Notes, Lecture Notes, Obsidian Flashcards Deck).
-- 💎 **Non-Destructive Vault Sync & Auto-Save**: Uses the **HTML5 File System Access API** (`showDirectoryPicker`) to save `.md` files and `.webp` attachments straight to your local Obsidian folder without any cloud intermediary. Features intelligent **non-destructive merging** with zero data loss—never overwriting your past progress or duplicating timestamps when returning to a video. Includes debounced real-time saving (2.5s) and a 15-second heartbeat auto-save with in-memory handle persistence.
+- 💎 **Non-Destructive Vault Sync & Direct Obsidian Saving**: Uses the **HTML5 File System Access API** (`showDirectoryPicker`) to save `.md` files and `.webp` attachments straight to your local Obsidian folder from the extension itself without any cloud intermediary. Features intelligent **non-destructive merging** with zero data loss, interactive 1-click vault connection, toolbar shortcut to **Open in Obsidian** (`obsidian://open`), and 1-click Markdown export.
+- 🔄 **Instant Startup & Tab Synchronization**: Automatically syncs with the active tab on startup and tab switching (`chrome.tabs.onActivated`, `onUpdated`), instantly loading the note corresponding to whatever lecture video you are watching.
 - 🔍 **Review Note & Timestamps Timeline**: Dedicated Review modal and top banner strip displaying all timestamps noted in your Obsidian file. Search note text, preview rendered Markdown, copy snippet blocks, or hit **"Resume at [MM:SS]"** to instantly continue the lecture where you previously left off. Rehydrates past frame attachments from disk across refreshes.
 - 🧠 **Multimodal AI Companion (Gemini 3.8 / 2.0 Flash)**:
   - **Frame Explainer & OCR**: Transcribes visible code, formulas, and diagrams into fenced Markdown blocks and Obsidian callouts (`> [!info]`).
@@ -58,9 +59,9 @@
 
 ### Prerequisites
 - Node.js 18+ and `npm`
-- Python 3.10+ (for the Chrome Live Caption bridge)
 - Google Chrome, Brave, or Microsoft Edge (Chromium 114+ with Side Panel support)
 - A free Google Gemini API Key from [Google AI Studio](https://aistudio.google.com/)
+- *(Optional)* Python 3.10+ (only if you wish to run the legacy Windows UIA desktop bridge)
 
 ### Installation & Development
 
@@ -73,12 +74,14 @@
 2. **Install dependencies**:
    ```bash
    npm install
-   pip install uiautomation websockets
    ```
 
-3. **Run unit tests**:
+3. **Run unit tests & type checks**:
    ```bash
    npm test
+   npx tsc --noEmit
+   # Optional Python companion bridge unit tests
+   python -m unittest companion/test_caption_bridge.py -v
    ```
 
 4. **Build the extension**:
@@ -93,16 +96,16 @@
    - Open any video (YouTube, Canvas LMS, Coursera) and click the **Video Notes** extension icon to open the Side Panel.
 
 6. **Connect Your Local Vault**:
-   - In the Side Panel header or Settings (`⚙️`), click **Select Vault** and choose your Obsidian vault directory.
-   - Enter your **Gemini API Key** (stored locally in browser storage).
+   - In the Side Panel header or Settings (`⚙️`), click **📁 Connect Vault** and choose your Obsidian vault folder.
+   - Enter your **Gemini API Key** in Settings (stored locally in browser storage).
+   - Notes, timestamps, and screenshots will save directly to your Obsidian vault from the extension itself!
+   - Use the **Open in Obsidian** toolbar button (`ExternalLink` icon) to jump to the note inside Obsidian at any time.
 
-7. **Live Caption Transcription (Optional, for Any Video/Canvas Lecture)**:
-   - In Chrome, open `chrome://settings/accessibility` and toggle **Live Caption** to **ON**.
-   - In your project terminal, start the companion bridge:
-     ```bash
-     npm run caption-bridge
-     ```
-   - Open the **Captions** tab in the Video Notes Side Panel. Live speech will stream directly with interactive timestamps!
+7. **Captions & Voice Dictation (100% In-Browser, Optional Windows Bridge)**:
+   - Open or keep running the **Captions** tab in the Video Notes Side Panel — all tabs stay mounted in the background, so live captions continue auto-appending (`autoAppend` enabled by default) even while you edit notes or inspect frames, while scoping extraction cleanly to your active video tab.
+   - Playing any lecture video on YouTube, Canvas LMS, Coursera, or Udemy will stream captions automatically with clickable timestamps and 2.0s smart pause chunking without splitting sentences or words prematurely.
+   - Click **Dictate** (`🎙️`) to use your browser's speech recognition to speak your notes or transcribe audio hands-free.
+   - *(Optional)* To capture system-wide **Chrome Live Caption** audio, turn on Live Captions in Chrome (`chrome://settings/captions`) so the caption bubble is active on screen and launch [`companion/run_bridge.bat`](companion/run_bridge.bat) (or `npm run caption-bridge`). When connected, the side panel automatically prioritizes Chrome Live Caption bridge output over in-browser subtitles to prevent duplicate entries.
 
 ---
 
@@ -111,9 +114,10 @@
 ```
 video_notes_00/
 ├── .agents/                        # Agent rules, workflows, and task configs
-├── companion/                      # Live Caption Desktop Bridge
+├── companion/                      # Optional Live Caption Desktop Bridge
 │   ├── caption_bridge.py           # Windows UIA live caption WebSocket bridge (ws://localhost:8765)
-│   └── run_bridge.bat              # Launcher batch script
+│   ├── test_caption_bridge.py      # Unit tests for UIA window filtering, pause flush & delta extraction
+│   └── run_bridge.bat              # Quick-start Windows batch launcher
 ├── entrypoints/
 │   ├── background.ts               # Side panel behavior & visibleTab screenshot fallback
 │   ├── content.ts                  # Multi-frame video detector, DOM observer & timestamp sync
@@ -124,19 +128,19 @@ video_notes_00/
 │       ├── components/
 │       │   ├── Editor.tsx          # Markdown editor with live preview
 │       │   ├── FrameGallery.tsx    # Slide snapshots & OCR explainer
-│       │   ├── LiveCaptionsTab.tsx # Live Chrome & Canvas caption stream
+│       │   ├── LiveCaptionsTab.tsx # Persistent background caption stream & pause chunking
 │       │   ├── AIAssistant.tsx     # Gemini multimodal chat & summaries
 │       │   ├── ReviewNoteModal.tsx # Obsidian review modal with timeline & resume action
-│       │   ├── Toolbar.tsx         # Quick action controls
+│       │   ├── Toolbar.tsx         # Scrollable quick action bar & Obsidian export controls
 │       │   └── SettingsModal.tsx   # Vault, API keys & templates config
 │       └── styles/
 │           └── theme.css           # Dark glassmorphic tokens & animations
 ├── utils/
 │   ├── geminiClient.ts             # Gemini 3.8/2.0 multimodal vision & transcript API
 │   ├── messaging.ts                # Type-safe extension message protocol
-│   ├── noteMerge.ts                # Non-destructive vault merging & strict timestamp parsing
+│   ├── noteMerge.ts                # Non-destructive vault merging, caption preservation & timestamp parsing
 │   ├── templates.ts                # Cornell, lecture & flashcard templates
-│   ├── transcriptExtractor.ts      # Canvas, Video.js & YouTube caption extractor & delta parser
+│   ├── transcriptExtractor.ts      # Canvas, Video.js & YouTube caption extractor & word-boundary delta parser
 │   └── vaultStorage.ts             # Local-first Obsidian vault file writer
 ├── tests/
 │   ├── noteMerge.test.ts           # Tests for non-destructive merge & timestamp parsing
@@ -159,11 +163,15 @@ video_notes_00/
 - [x] Rich Markdown editor with live preview & inline clickable timestamp seeking
 - [x] Global keyboard shortcuts (`Alt+S`, `Alt+T`, `Alt+P`)
 - [x] Real-time Chrome Live Caption streaming bridge with delta-deduplication
+- [x] Standalone in-browser live captioning & Web Speech voice dictation
 - [x] Canvas LMS, Canvas Studio & Video.js iframe integration & subtitle scraping
 - [x] Non-destructive vault file merge (preserves external edits, prevents overwriting)
+- [x] Direct Obsidian URI protocol integration (`obsidian://open`) & 1-click Markdown export
 - [x] Obsidian attachment rehydration across browser sessions
 - [x] Real-time playhead seek tracking & persistent "Resume at [MM:SS]"
 - [x] Review Note modal with chronological timestamp timeline & live markdown preview
+- [x] Horizontally scrollable glassmorphic toolbar with mouse wheel navigation
+- [x] Continuous background caption processing across side panel tabs
 - [x] Obsidian note templates (Cornell Notes, Lecture Notes, Flashcards Deck)
 - [x] Real-time & periodic auto-saving directly to local Obsidian vault
 - [ ] YouTube chapter & playlist auto-indexing

@@ -180,7 +180,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               style={{ cursor: 'pointer', accentColor: 'var(--accent-primary)' }}
             />
             <label htmlFor="autoSaveToggle" style={{ fontSize: '11.5px', color: 'var(--text-primary)', cursor: 'pointer', userSelect: 'none' }}>
-              Auto-save to vault every 30s & on pause
+              Auto-save to vault (2.5s after edits &amp; 15s heartbeat)
             </label>
           </div>
           <p style={{ fontSize: '11px', color: 'var(--text-subtle)', marginTop: '4px' }}>
@@ -188,15 +188,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </p>
         </div>
 
-        {/* Chrome Live Caption Bridge */}
+        {/* Live Captions, Dictation & Optional Bridge */}
         <div>
           <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 500, marginBottom: '6px', color: 'var(--text-muted)' }}>
             <Radio size={13} color="var(--accent-primary)" />
-            <span>Chrome Live Caption Bridge</span>
+            <span>Live Captions &amp; Bridge</span>
           </label>
           <div style={{ padding: '8px 10px', background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', fontSize: '11px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
             <div style={{ color: 'var(--text-muted)', lineHeight: 1.4 }}>
-              Enable <b>Live Caption</b> in Chrome (<code>chrome://settings/accessibility</code>) and start the local bridge:
+              In-page subtitles (YouTube, Coursera, Udemy, Canvas LMS, HTML5) and <b>Dictate</b> work directly in Chrome. For Chrome&apos;s OS Live Caption bubble (<code>chrome://settings/accessibility</code>), start the local bridge:
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <code style={{ flex: 1, padding: '4px 6px', background: '#090d16', borderRadius: '4px', fontSize: '10.5px', color: '#34d399', fontFamily: 'monospace' }}>
@@ -209,6 +209,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               >
                 Copy
               </button>
+            </div>
+            <div style={{ color: 'var(--text-subtle)', lineHeight: 1.4, fontSize: '10.5px' }}>
+              Or run <code>companion/run_bridge.bat</code> (<code>ws://127.0.0.1:8765</code>).
             </div>
           </div>
         </div>

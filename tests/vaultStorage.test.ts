@@ -1,8 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   saveMarkdownFileNonDestructive,
   readMarkdownFileWithMeta,
   findExistingNote,
+  openNoteInObsidian,
+  downloadMarkdownFile,
+  checkVaultPermissionStatus,
+  setCachedVaultHandle,
 } from '../utils/vaultStorage';
 
 class MockFileHandle {
@@ -162,5 +166,53 @@ source: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     expect(match?.fileName).toBe('Custom React Title.md');
     expect(match?.content).toBe(fileContent);
     expect(match?.lastModified).toBe(5000);
+  });
+
+  it('triggers obsidian:// URI with correct vault and file parameters', () => {
+    const openSpy = vi.fn();
+    (globalThis as any).window = { open: openSpy };
+
+    openNoteInObsidian('My Vault', 'Deep Learning Notes.md');
+    expect(openSpy).toHaveBeenCalledWith(
+      'obsidian://open?vault=My%20Vault&file=Deep%20Learning%20Notes',
+      '_blank'
+    );
+  });
+
+  it('downloads markdown file with safe filename sanitization', () => {
+    const clickSpy = vi.fn();
+    const appendSpy = vi.fn();
+    const removeSpy = vi.fn();
+    let createdAnchor: any = null;
+
+    (globalThis as any).document = {
+      createElement: (tag: string) => {
+        createdAnchor = { click: clickSpy, href: '', download: '' };
+        return createdAnchor;
+      },
+      body: {
+        appendChild: appendSpy,
+        removeChild: removeSpy,
+      },
+    };
+    (globalThis as any).URL = {
+      createObjectURL: vi.fn(() => 'blob:mock-url'),
+      revokeObjectURL: vi.fn(),
+    };
+
+    downloadMarkdownFile('Dangerous: / Path? Name', '# Content');
+    expect(createdAnchor).not.toBeNull();
+    expect(createdAnchor.download).toBe('Dangerous- - Path- Name.md');
+    expect(clickSpy).toHaveBeenCalled();
+  });
+
+  it('reports granted permission status when live handle is cached', async () => {
+    const mockHandle = {
+      queryPermission: vi.fn(async () => 'granted' as PermissionState),
+    };
+    setCachedVaultHandle(mockHandle as any);
+    const status = await checkVaultPermissionStatus();
+    expect(status).toBe('granted');
+    setCachedVaultHandle(null);
   });
 });

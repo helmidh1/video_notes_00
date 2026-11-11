@@ -225,4 +225,76 @@ User wrote custom summary here.
     expect(merged).toContain('frame-flask.webp');
     expect(merged).toContain('Chemical reaction with bubbles');
   });
+
+  it('preserves ### headers and timestamped caption bullets when merging into an existing note', () => {
+    const existing = `---
+title: "Lecture 3"
+url: "https://youtube.com/watch?v=cap123"
+---
+# Lecture 3
+
+### [00:30](https://youtube.com/watch?v=cap123#t=30s)
+![[frame-30.webp]]
+
+- [00:45](https://youtube.com/watch?v=cap123#t=45s) First spoken sentence in the lecture.
+`;
+
+    const incoming = `---
+title: "Lecture 3"
+url: "https://youtube.com/watch?v=cap123"
+---
+# Lecture 3
+
+### [00:30](https://youtube.com/watch?v=cap123#t=30s)
+![[frame-30.webp]]
+
+- [00:45](https://youtube.com/watch?v=cap123#t=45s) First spoken sentence in the lecture.
+- [01:10](https://youtube.com/watch?v=cap123#t=70s) Second spoken sentence added later.
+
+### [01:25](https://youtube.com/watch?v=cap123#t=85s)
+![[frame-85.webp]]
+`;
+
+    const merged = mergeMarkdownNotes(existing, incoming);
+    expect(merged).toContain('### [00:30](https://youtube.com/watch?v=cap123#t=30s)');
+    expect(merged).toContain('![[frame-30.webp]]');
+    expect(merged).toContain('- [00:45](https://youtube.com/watch?v=cap123#t=45s) First spoken sentence in the lecture.');
+    expect(merged).toContain('- [01:10](https://youtube.com/watch?v=cap123#t=70s) Second spoken sentence added later.');
+    expect(merged).toContain('### [01:25](https://youtube.com/watch?v=cap123#t=85s)');
+    expect(merged).toContain('![[frame-85.webp]]');
+    // Should deduplicate the [00:45] caption line rather than duplicating it
+    expect(merged.match(/First spoken sentence in the lecture\./g)).toHaveLength(1);
+    // Consecutive caption bullets should be separated cleanly by a single newline
+    expect(merged).toContain(
+      '- [00:45](https://youtube.com/watch?v=cap123#t=45s) First spoken sentence in the lecture.\n- [01:10](https://youtube.com/watch?v=cap123#t=70s) Second spoken sentence added later.'
+    );
+  });
+
+  it('allows same-second caption bullets and ### snapshot headers to coexist chronologically', () => {
+    const existing = `---
+title: "Dual Same Second"
+url: "https://youtube.com/watch?v=dual99"
+---
+# Dual Same Second
+
+- [01:15](https://youtube.com/watch?v=dual99#t=75s) Spoken remark at 01:15.
+`;
+
+    const incoming = `---
+title: "Dual Same Second"
+url: "https://youtube.com/watch?v=dual99"
+---
+# Dual Same Second
+
+### [01:15](https://youtube.com/watch?v=dual99#t=75s)
+![[frame-75.webp]]
+
+- [01:15](https://youtube.com/watch?v=dual99#t=75s) Spoken remark at 01:15.
+`;
+
+    const merged = mergeMarkdownNotes(existing, incoming);
+    expect(merged).toContain('- [01:15](https://youtube.com/watch?v=dual99#t=75s) Spoken remark at 01:15.');
+    expect(merged).toContain('### [01:15](https://youtube.com/watch?v=dual99#t=75s)');
+    expect(merged).toContain('![[frame-75.webp]]');
+  });
 });

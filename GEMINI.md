@@ -78,6 +78,7 @@ video_notes_00/
 │       └── gemini-multimodal-assistant/
 ├── companion/                      # Live Caption Desktop Bridge
 │   ├── caption_bridge.py           # Windows UIA live caption WebSocket server (ws://localhost:8765)
+│   ├── test_caption_bridge.py      # Unit tests for UIA window filtering, pause flush & delta extraction
 │   └── run_bridge.bat              # Quick start batch launcher
 ├── entrypoints/
 │   ├── background.ts               # Side Panel behavior, CORS screenshot fallback handler
@@ -89,10 +90,10 @@ video_notes_00/
 │       ├── components/
 │       │   ├── Editor.tsx          # Markdown editor with timestamp hotkeys & live preview
 │       │   ├── FrameGallery.tsx    # Captured frames with OCR, Explain, and Seek actions
-│       │   ├── LiveCaptionsTab.tsx # Live Chrome & Web caption stream with delta deduplication
+│       │   ├── LiveCaptionsTab.tsx # Source-isolated caption stream (bridge, web cues, Web Speech) with pause debounce
 │       │   ├── AIAssistant.tsx     # Gemini multimodal chat & transcript summarizer
 │       │   ├── ReviewNoteModal.tsx # Obsidian review modal with chronological timeline & resume action
-│       │   ├── Toolbar.tsx         # Fast access action bar
+│       │   ├── Toolbar.tsx         # Scrollable quick action bar & Obsidian export controls
 │       │   └── SettingsModal.tsx   # Obsidian vault connector & API configuration
 │       └── styles/
 │           └── theme.css           # Dark glassmorphic tokens & typography
@@ -122,7 +123,7 @@ video_notes_00/
 - **Safety Guarantee**: Saving to an existing Obsidian note never wipes, truncates, or blindly overwrites content.
 - **Content Matching**: Locates existing files by matching sanitized titles or `url:` in the YAML frontmatter.
 - **Intelligent Diff Merging**:
-  - Preserves user edits made in Obsidian outside the browser.
+  - Preserves user edits made in Obsidian outside the browser, alongside `###` section headers and `- [MM:SS](...)` live caption bullets (`type: 'caption'`).
   - Appends new timestamped sections and snapshot attachments seamlessly.
   - Automatically rehydrates captured frame images from the vault's attachment directory (`attachments/`) across browser sessions and reloads.
 
@@ -142,10 +143,26 @@ video_notes_00/
 - **Strict Validation**: Requires seconds to strictly match `[0-5]\d` (`00-59`).
 - **Ordered Last Note Lookup**: `getLastRecordedTimestamp(markdown)` retrieves the most recently appended note entry in document order rather than just the mathematical maximum second.
 
-### 4. Chrome Live Caption Desktop Bridge (`companion/caption_bridge.py`)
-- Connects to Windows UI Automation (`uiautomation`) to read Chrome's floating Live Caption window (`Chrome_WidgetWin_1`).
-- Runs a local WebSocket server at `ws://localhost:8765`.
-- Broadcasts real-time transcript chunks directly to `LiveCaptionsTab.tsx` with delta-deduplication, allowing seamless note-taking even when YouTube or third-party web captions are unavailable or closed.
+### 4. Standalone In-Browser Captions, Subtitles & Voice Dictation (`LiveCaptionsTab.tsx`)
+- **Zero-Setup In-Browser Engine**: Runs completely inside Chrome without requiring any Python companion script or external bridge processes.
+- **Automated Subtitle Streamer**: When active in the side panel, `content.ts` (`liveCaptionsEnabledBySidePanel`) captures captions on the active video tab across YouTube, Coursera, Udemy, Canvas LMS, and any HTML5 video player via [`selectPreferredCaptionTrack`](entrypoints/content.ts) (selecting a single `captions`/`subtitles` track) and optionally enabling YouTube CC when `autoEnableCC` is active (disabled automatically if the desktop bridge connects first).
+- **Browser-Native Web Speech Dictation**: Uses `webkitSpeechRecognition` for hands-free lecture speech transcription and voice note dictation with real-time video timestamp tagging and clean fatal-error recovery.
+- **Optional Desktop Bridge**: Gracefully auto-connects to local bridge `ws://localhost:8765` if running, prioritizes bridge output over in-browser web captions when connected, and uses `reconcileBridgeDeltaWithSafetyCommit()` to avoid duplicate prefixes across pause flushes.
+
+### 5. Multi-Tier Frictionless Obsidian Note Saving
+- **Direct Vault Storage**: Writes markdown notes and `.webp` attachments directly into user-selected Obsidian vault folders using the File System Access API.
+- **Startup & Tab Synchronization**: Listens to `chrome.tabs.onActivated`, `chrome.tabs.onUpdated`, and active-tab `VIDEO_TIME_UPDATE` events via [`switchNoteContext`](entrypoints/sidepanel/App.tsx) (`isProvisionalTitleRef`, `captureSaveSnapshot`, and `saveQueueRef`), flushing outgoing context writes before switching videos without leaking stale titles or cross-tab state.
+- **Obsidian Protocol URI (`obsidian://open`)**: Direct one-click shortcut from the extension toolbar to open the active note inside the desktop Obsidian application.
+- **One-Click Markdown Export**: Direct browser download of `.md` notes and attachments for instant access even without local folder picker permissions.
+
+### 6. Continuous Background Caption Processing & Smart Pause Chunking (`App.tsx`, `LiveCaptionsTab.tsx`, `caption_bridge.py`)
+- **Persistent Tab Mounting & Active-Tab Scoping**: `App.tsx` keeps all side panel tabs mounted using CSS visibility toggling (`display: flex` / `none`) so live caption streams, Web Speech dictation, and the optional WebSocket bridge listener remain active across tabs, while gating incoming captions and video updates to the active video tab/context (`switchNoteContext`, `isVideoOrNoteTab`).
+- **Auto-Append & Source Isolation**: `LiveCaptionsTab.tsx` persists the `autoAppend` toggle in `chrome.storage.local` (defaulting to `true`), isolates buffers and timers per caption source via `streamStatesRef`, and maintains an auto-reconnect loop when the desktop bridge is offline.
+- **Smart Pause Flush & Rolling-Bubble Alignment**: `CaptionStreamTracker` in `caption_bridge.py` (`process_events()` and `_split_completed_sentences()` committing completed sentences on punctuation without waiting for trailing unpunctuated clauses, excluding Chrome browser windows, filtering UI button controls on descendants, and flushing trailing incomplete speech only after a 4.0s pause or source detach) paired with `extract_delta_text()` / `extractDeltaText()` (normalized prefix matching and bigram-guarded tail-anchor alignment across un-scrolled rolling bubbles with ASR seam edits) and `processBridgeCaption` / `processWebCaption` (5.5s bridge safety fallback and 2.0s web caption debounce) flushes incremental captions into timestamped note entries without carry-over duplication or mid-sentence splits.
+
+### 7. Scrollable Header Toolbar with Mouse Wheel Navigation (`Toolbar.tsx`, `theme.css`)
+- **Horizontal Overflow Handling**: `Toolbar.tsx` wraps action button groups (`flexShrink: 0`) inside a `minWidth: 'max-content'` container within an `overflowX: 'auto'`, `whiteSpace: 'nowrap'` scroll region so compact side panel widths never clip controls.
+- **Mouse Wheel & Visual Polish**: Attaches an `onWheel` listener to translate vertical mouse wheel scrolling into horizontal toolbar scrolling, styled with the `.scrollable-toolbar` 4px translucent scrollbar in `theme.css`.
 
 ---
 
