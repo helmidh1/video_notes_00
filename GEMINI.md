@@ -48,6 +48,7 @@ To achieve the best possible developer and user experience, the following free t
 | **StitchMCP** *(Configured)* | Generates UI design systems and aesthetic component variants for high-contrast dark mode interfaces. | Google Stitch MCP |
 
 ### 2. Active Workspace Skills (`.agents/skills/`)
+- `portfolio-publish` / `publish`: Pre-publish sensitive data and PII audit, git history anonymization, portfolio README enrichment, test/build validation, and safe publishing.
 - `update-docs` / `docs`: Automated audit and synchronization workflow for `GEMINI.md`, `README.md`, `package.json`, and project docs.
 - `git-commit-push` / `commit`: Safe pre-commit audit, typecheck/test validation gates, Conventional Commits formatting, staging, and remote push.
 - `wxt-extension-dev`: Architectural cheatsheet and rules for WXT, Chromium Manifest V3, Side Panel API, Content Script lifecycle, and isolated world execution.
