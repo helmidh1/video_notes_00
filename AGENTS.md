@@ -14,4 +14,9 @@ Canonical triage roles mapped to standard labels (`needs-triage`, `needs-info`, 
 
 ### Domain docs
 
-Single-context documentation (`GLOSSARY.md` and `docs/adr/` at repo root). See `docs/agents/domain.md`.
+Single-context documentation (`GLOSSARY.md` and `docs/adr/` at repo root). Read `GLOSSARY.md` for domain vocabulary (`Note Document`, `Vault`, `Attachment`, `Session Mirror`) and `docs/adr/` before touching persistence or player subsystems. See `docs/agents/domain.md`.
+
+## Engineering guardrails
+
+- **Unified quality gate**: Run `npm run check` (`tsc --noEmit && vitest run`) before committing changes.
+- **Fresh worktree setup**: Run `npm install` (triggers `postinstall: wxt prepare`) to generate `.wxt/tsconfig.json` and type definitions.
