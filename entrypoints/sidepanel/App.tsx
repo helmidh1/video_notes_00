@@ -8,20 +8,17 @@ import type {
 import {
   getSavedVaultDirectory,
   getSavedVaultName,
-  saveBinaryAttachment,
-  saveMarkdownFile,
-  saveMarkdownFileNonDestructive,
-  readMarkdownFile,
-  readMarkdownFileWithMeta,
-  readBinaryAttachment,
-  findExistingNote,
   selectVaultDirectory,
   reauthorizeVault,
-  generateObsidianFrontmatter,
   checkVaultPermissionStatus,
   openNoteInObsidian,
   downloadMarkdownFile,
 } from '../../utils/vaultStorage';
+import {
+  createDefaultVaultRepository,
+  VaultRepository,
+  type NoteDocument,
+} from '../../utils/vaultRepository';
 import {
   parseTimestampsFromMarkdown,
   parseFramesFromMarkdown,
@@ -172,6 +169,7 @@ export default function App() {
   const savedFrameIdsRef = useRef<Set<string>>(new Set());
   const isSavingRef = useRef<boolean>(false);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const vaultRepoRef = useRef<VaultRepository>(createDefaultVaultRepository());
   const isCheckingVaultRef = useRef<boolean>(false);
   const isProvisionalTitleRef = useRef<boolean>(true);
   const currentWindowIdRef = useRef<number | undefined>(undefined);
@@ -277,114 +275,64 @@ export default function App() {
       }
     }
 
-    // 1. PRIMARY SOURCE OF TRUTH: Query Obsidian vault directory first
-    let dirHandle: FileSystemDirectoryHandle | null = null;
+    // 1. PRIMARY SOURCE OF TRUTH: Query Obsidian vault directory via VaultRepository
+    isCheckingVaultRef.current = true;
     try {
-      dirHandle = await getSavedVaultDirectory();
+      const searchTitle = targetTitle === 'Video Notes' ? '' : targetTitle;
+      const loadedDoc = await vaultRepoRef.current.loadNote(targetUrl, searchTitle);
       if (loadSeq !== activeLoadSeqRef.current) return;
-    } catch {
-      // Ignored
-    }
 
-    if (dirHandle) {
-      isCheckingVaultRef.current = true;
-      try {
-        const searchTitle = targetTitle === 'Video Notes' ? '' : targetTitle;
-        const match = await findExistingNote(dirHandle, searchTitle, targetUrl);
-        if (loadSeq !== activeLoadSeqRef.current) return;
+      if (loadedDoc && (loadedDoc.markdown || loadedDoc.frames.length > 0)) {
+        setExistingVaultMarkdown(loadedDoc.markdown);
+        setExistingVaultFileName(loadedDoc.existingFileName || `${searchTitle || 'Video Notes'}.md`);
+        existingVaultFileNameRef.current = loadedDoc.existingFileName || `${searchTitle || 'Video Notes'}.md`;
 
-        if (match && match.content) {
-          setExistingVaultMarkdown(match.content);
-          setExistingVaultFileName(match.fileName);
-          existingVaultFileNameRef.current = match.fileName;
-
-          const foundTimestamps = parseTimestampsFromMarkdown(match.content);
-
-          // Adopt title from frontmatter or filename if available and lock against provisional tab updates
-          const fm = extractFrontmatter(match.content);
-          const resolvedTitle = fm.title || match.fileName.replace(/\.md$/, '') || targetTitle;
-          if (resolvedTitle) {
-            setNoteTitle(resolvedTitle);
-            noteTitleRef.current = resolvedTitle;
-            isProvisionalTitleRef.current = false;
-          }
-
-          // Reconcile newer local session edits captured before disk write completed
-          const hasNewerSessionCache =
-            !forceReload &&
-            Boolean(cachedSession?.markdown) &&
-            cachedSession!.markdown!.trim() !== match.content.trim() &&
-            (cachedSession!.updatedAt || 0) > (match.lastModified || 0);
-
-          const nextMarkdown = hasNewerSessionCache ? cachedSession!.markdown! : match.content;
-
-          // Populate editor with Obsidian file content (or newer local cache) and sync tracking refs
-          updateMarkdown(nextMarkdown);
-          lastSavedMarkdownRef.current = match.content;
-          lastSavedTitleRef.current = resolvedTitle;
-          lastKnownDiskContentRef.current = match.content;
-          lastKnownFileModifiedRef.current = match.lastModified || Date.now();
-          lastSavedDiskByUrlRef.current.set(targetUrl.split('#')[0], match.content);
-          setHasUnsavedChanges(hasNewerSessionCache);
-
-          // Rehydrate frame attachments from vault attachments directory (always update to clear stale frames)
-          const frameNames = parseFramesFromMarkdown(nextMarkdown);
-          const restoredFrames: CapturedFrame[] = [];
-          if (frameNames.length > 0) {
-            for (const fn of frameNames) {
-              const existingFrame = framesRef.current.find((f) => f.fileName === fn);
-              if (existingFrame) {
-                restoredFrames.push(existingFrame);
-                savedFrameIdsRef.current.add(existingFrame.id);
-              } else {
-                const dataUrl = await readBinaryAttachment(dirHandle, fn);
-                if (loadSeq !== activeLoadSeqRef.current) return;
-                if (dataUrl) {
-                  const ts = foundTimestamps.find((t) => t.imageFileName === fn);
-                  const newF: CapturedFrame = {
-                    id: crypto.randomUUID(),
-                    fileName: fn,
-                    formattedTime: ts?.formattedTime || '00:00',
-                    timestamp: ts?.seconds || 0,
-                    dataUrl,
-                    pageTitle: resolvedTitle,
-                  };
-                  restoredFrames.push(newF);
-                  savedFrameIdsRef.current.add(newF.id);
-                }
-              }
-            }
-          }
-          setFrames(restoredFrames);
-          framesRef.current = restoredFrames;
-
-          // Keep local storage session cache synchronized when disk won
-          if (!hasNewerSessionCache && typeof chrome !== 'undefined' && chrome.storage?.local) {
-            chrome.storage.local.set({
-              [cleanSessionKey]: {
-                markdown: match.content,
-                title: resolvedTitle,
-                url: targetUrl,
-                updatedAt: match.lastModified || Date.now(),
-              },
-            }).catch(() => {});
-          }
-
-          showStatus(
-            hasNewerSessionCache
-              ? `Restored newer local edits alongside Obsidian note (${foundTimestamps.length} timestamps).`
-              : `Loaded note from Obsidian (${foundTimestamps.length} timestamps).`,
-            'success',
-            3000
-          );
-          return;
+        const foundTimestamps = parseTimestampsFromMarkdown(loadedDoc.markdown);
+        const resolvedTitle = loadedDoc.title || targetTitle;
+        if (resolvedTitle) {
+          setNoteTitle(resolvedTitle);
+          noteTitleRef.current = resolvedTitle;
+          isProvisionalTitleRef.current = false;
         }
-      } catch (err) {
-        console.warn('Error checking existing note in vault:', err);
-      } finally {
-        if (loadSeq === activeLoadSeqRef.current) {
-          isCheckingVaultRef.current = false;
+
+        // Reconcile newer local session edits captured before disk write completed
+        const hasNewerSessionCache =
+          !forceReload &&
+          Boolean(cachedSession?.markdown) &&
+          cachedSession!.markdown!.trim() !== loadedDoc.markdown.trim() &&
+          (cachedSession!.updatedAt || 0) > (loadedDoc.lastModified || 0);
+
+        const nextMarkdown = hasNewerSessionCache ? cachedSession!.markdown! : loadedDoc.markdown;
+
+        updateMarkdown(nextMarkdown);
+        lastSavedMarkdownRef.current = loadedDoc.markdown;
+        lastSavedTitleRef.current = resolvedTitle;
+        lastKnownDiskContentRef.current = loadedDoc.markdown;
+        lastKnownFileModifiedRef.current = loadedDoc.lastModified || Date.now();
+        lastSavedDiskByUrlRef.current.set(targetUrl.split('#')[0], loadedDoc.markdown);
+        setHasUnsavedChanges(hasNewerSessionCache);
+
+        // Frames are already eagerly rehydrated by VaultRepository
+        setFrames(loadedDoc.frames);
+        framesRef.current = loadedDoc.frames;
+        for (const f of loadedDoc.frames) {
+          savedFrameIdsRef.current.add(f.id);
         }
+
+        showStatus(
+          hasNewerSessionCache
+            ? `Restored newer local edits alongside Obsidian note (${foundTimestamps.length} timestamps).`
+            : `Loaded note from Obsidian (${foundTimestamps.length} timestamps).`,
+          'success',
+          3000
+        );
+        return;
+      }
+    } catch (err) {
+      console.warn('Error checking existing note in vault:', err);
+    } finally {
+      if (loadSeq === activeLoadSeqRef.current) {
+        isCheckingVaultRef.current = false;
       }
     }
 
@@ -410,23 +358,15 @@ export default function App() {
   // Check if the note in Obsidian was modified externally (e.g. user edited in Obsidian)
   async function checkForExternalVaultModifications() {
     if (isSavingRef.current || isCheckingVaultRef.current) return;
-    let dirHandle: FileSystemDirectoryHandle | null = null;
-    try {
-      dirHandle = await getSavedVaultDirectory();
-    } catch {
-      return;
-    }
-    if (!dirHandle) return;
-
     try {
       const targetTitle = noteTitleRef.current;
       const targetUrl = pageUrlRef.current;
       const searchTitle = targetTitle === 'Video Notes' ? '' : targetTitle;
-      const match = await findExistingNote(dirHandle, searchTitle, targetUrl);
-      if (!match || !match.content) return;
+      const loaded = await vaultRepoRef.current.loadNote(targetUrl, searchTitle);
+      if (!loaded || !loaded.markdown) return;
       if (pageUrlRef.current.split('#')[0] !== targetUrl.split('#')[0]) return;
 
-      const diskContent = match.content;
+      const diskContent = loaded.markdown;
       const lastKnownDisk = lastKnownDiskContentRef.current;
 
       // Check if file content on disk differs from what was last loaded/saved
@@ -436,12 +376,12 @@ export default function App() {
           // User edited in Obsidian, and made NO conflicting edits in the extension editor!
           // Seamlessly update editor with the new Obsidian content
           setExistingVaultMarkdown(diskContent);
-          setExistingVaultFileName(match.fileName);
-          existingVaultFileNameRef.current = match.fileName;
+          setExistingVaultFileName(loaded.existingFileName || `${searchTitle || 'Video Notes'}.md`);
+          existingVaultFileNameRef.current = loaded.existingFileName || `${searchTitle || 'Video Notes'}.md`;
           updateMarkdown(diskContent);
           lastSavedMarkdownRef.current = diskContent;
           lastKnownDiskContentRef.current = diskContent;
-          lastKnownFileModifiedRef.current = match.lastModified || Date.now();
+          lastKnownFileModifiedRef.current = loaded.lastModified || Date.now();
           lastSavedDiskByUrlRef.current.set(targetUrl.split('#')[0], diskContent);
           setHasUnsavedChanges(false);
 
@@ -452,7 +392,7 @@ export default function App() {
                 markdown: diskContent,
                 title: targetTitle,
                 url: targetUrl,
-                updatedAt: match.lastModified || Date.now(),
+                updatedAt: loaded.lastModified || Date.now(),
               },
             }).catch(() => {});
           }
@@ -1163,15 +1103,14 @@ export default function App() {
       // Skip if note is empty
       if (!currentMarkdown.trim() && currentFrames.length === 0) return;
 
-      let dirHandle: FileSystemDirectoryHandle | null = null;
-      try {
-        dirHandle = await getSavedVaultDirectory(!isSilent);
-      } catch {
-        // Ignore background permission queries
-      }
-
-      if (!dirHandle) {
-        if (!isSilent) {
+      if (!isSilent) {
+        let dirHandle: FileSystemDirectoryHandle | null = null;
+        try {
+          dirHandle = await getSavedVaultDirectory(false);
+        } catch {
+          // Ignored
+        }
+        if (!dirHandle) {
           try {
             dirHandle = await reauthorizeVault();
             if (dirHandle) {
@@ -1182,27 +1121,7 @@ export default function App() {
             showStatus(err instanceof Error ? err.message : 'Folder selection canceled.', 'error');
             return;
           }
-        } else {
-          setVaultPermissionNeeded(true);
-          // Continuously mirror to chrome.storage.local so zero edits are lost
-          if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-            const cleanKey = 'session_' + (saveContextUrl || currentTitle);
-            chrome.storage.local.set({
-              [cleanKey]: {
-                markdown: currentMarkdown,
-                title: currentTitle,
-                url: currentPageUrl,
-                updatedAt: Date.now(),
-              },
-            }).catch(() => {});
-          }
-          return;
         }
-      }
-
-      if (!dirHandle) return;
-      if (pageUrlRef.current.split('#')[0] === saveContextUrl) {
-        setVaultPermissionNeeded(false);
       }
 
       isSavingRef.current = true;
@@ -1212,81 +1131,44 @@ export default function App() {
       }
 
       try {
-        // 1. Only write new frames that haven't been saved to disk yet
-        for (const frame of currentFrames) {
-          if (!savedFrameIdsRef.current.has(frame.id)) {
-            await saveBinaryAttachment(dirHandle, frame.fileName, frame.dataUrl);
-            savedFrameIdsRef.current.add(frame.id);
-          }
-        }
-
-        // 2. Format content with frontmatter if not already present
-        const fullContent = currentMarkdown.startsWith('---')
-          ? currentMarkdown
-          : generateObsidianFrontmatter({
-              title: currentTitle,
-              sourceUrl: currentPageUrl,
-              tags: ['video-notes', 'study'],
-            }) + currentMarkdown;
-
-        // Determine target file name from synchronized snapshot: avoid duplicating matched notes
-        const targetFileName = currentExistingFileName
-          ? currentExistingFileName.replace(/\.md$/, '')
-          : currentTitle;
-
         const resolvedBaseContent = lastSavedDiskByUrlRef.current.get(saveContextUrl) ?? snapshotBaseContent;
 
-        // 3. Write markdown file to Obsidian vault with optimistic concurrency control
-        const saveResult = await saveMarkdownFileNonDestructive(
-          dirHandle,
-          targetFileName,
-          fullContent,
-          {
-            allowOverwrite: false,
-            baseContent: resolvedBaseContent,
-          }
-        );
+        const docToSave: NoteDocument = {
+          title: currentTitle,
+          markdown: currentMarkdown,
+          frames: currentFrames,
+          pageUrl: currentPageUrl,
+          existingFileName: currentExistingFileName || undefined,
+          baseContent: resolvedBaseContent,
+        };
 
-        lastSavedDiskByUrlRef.current.set(saveContextUrl, saveResult.finalContent);
+        const saveResult = await vaultRepoRef.current.saveNote(docToSave);
 
-        // Persist session snapshot for this note's URL even if panel switched mid-save
-        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-          const cleanKey = 'session_' + (saveContextUrl || currentTitle);
-          chrome.storage.local.set({
-            [cleanKey]: {
-              markdown: saveResult.finalContent,
-              title: currentTitle,
-              url: currentPageUrl,
-              updatedAt: saveResult.lastModified || Date.now(),
-            },
-          });
-        }
+        lastSavedDiskByUrlRef.current.set(saveContextUrl, saveResult.content);
 
         const isStillSameContext = pageUrlRef.current.split('#')[0] === saveContextUrl;
         if (isStillSameContext) {
-          setExistingVaultMarkdown(saveResult.finalContent);
-          setExistingVaultFileName(`${targetFileName}.md`);
-          existingVaultFileNameRef.current = `${targetFileName}.md`;
-          lastKnownDiskContentRef.current = saveResult.finalContent;
-          lastKnownFileModifiedRef.current = saveResult.lastModified;
+          setExistingVaultMarkdown(saveResult.content);
+          setExistingVaultFileName(saveResult.fileName);
+          existingVaultFileNameRef.current = saveResult.fileName;
+          lastKnownDiskContentRef.current = saveResult.content;
 
-          if (saveResult.wasMerged) {
-            updateMarkdown(saveResult.finalContent);
-            lastSavedMarkdownRef.current = saveResult.finalContent;
-          } else {
-            lastSavedMarkdownRef.current = saveResult.finalContent;
+          if (saveResult.status === 'merged') {
+            updateMarkdown(saveResult.content);
           }
-
+          lastSavedMarkdownRef.current = saveResult.content;
           lastSavedTitleRef.current = currentTitle;
           setLastSavedTime(new Date());
-          setVaultPermissionNeeded(false);
+          setVaultPermissionNeeded(saveResult.destination === 'session_mirror');
           setHasUnsavedChanges(false);
 
           if (!isSilent) {
             showStatus(
-              saveResult.wasMerged
+              saveResult.status === 'merged'
                 ? `Safely merged with existing Obsidian note (zero data loss).`
-                : `Saved "${targetFileName}.md" and ${currentFrames.length} images to ${dirHandle.name}.`,
+                : saveResult.destination === 'session_mirror'
+                ? `Saved draft to local storage (permission needed for Obsidian folder).`
+                : `Saved "${saveResult.fileName}" and ${saveResult.savedAttachmentCount} images to vault.`,
               'success'
             );
           }
